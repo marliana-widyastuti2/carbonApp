@@ -9,7 +9,7 @@ import rasterio
 from rasterio.mask import mask
 
 
-st.set_page_config(page_title="Clip raster by shapefile", layout="centered")
+st.set_page_config(page_title="CarbonSampling App", layout="centered")
 st.title("Clip raster by shapefile (local raster)")
 
 st.write("Pick a local raster from a folder, then upload a **zipped shapefile** to clip it.")
