@@ -19,6 +19,7 @@ from scipy.spatial import distance_matrix
 from scipy.spatial import cKDTree
 
 random.seed(42)
+warnings.filterwarnings("ignore")
 
 """
 This module contains functions for stratifying datasets based on its spatial distribution.
@@ -629,15 +630,16 @@ def choose_global_minimum_samples(
     n_sim=100,
     n_max=100,
     max_attempts=100,
+    prefer_lower_H=True,
 ):
     """
-    Search across H (from 2..H_max) and return the design with MINIMUM total n_samples
+    Search across H (from 3..H_max) and return the design with MINIMUM total n_samples
     that satisfies all constraints. Keeps strata_df and samp_df.
     Returns dict or None.
     """
     best = None
 
-    for H in range(2, H_max + 1):
+    for H in range(3, H_max + 1):
         res = find_minimum_samples_for_H(
             data=data,
             H=H,
@@ -655,8 +657,67 @@ def choose_global_minimum_samples(
 
         if (best is None) or (res["n_samples"] < best["n_samples"]):
             best = res
-        # Tie-breaker: if same n_samples, prefer higher H (optional)
-        elif (best is not None) and (res["n_samples"] == best["n_samples"]) and (res["n_strata"] > best["n_strata"]):
-            best = res
+        elif res["n_samples"] == best["n_samples"]:
+            if prefer_lower_H:
+                if res["n_strata"] < best["n_strata"]:
+                    best = res
+            else:
+                if res["n_strata"] > best["n_strata"]:
+                    best = res
 
     return best
+
+def choose_global_minimum_samples_with_fallback(
+    data,
+    H_max=7,
+    nh_min_start=3,
+    aimed_Svar=0.001,
+    minDistance=50,
+    kernel_size=3,
+    n_sim=100,
+    n_max=100,
+    max_attempts=100,
+    prefer_lower_H=True,
+    fallback_sequence=(3, 2, 1, 0),
+):
+    """
+    Try choose_global_minimum_samples using nh_min in descending strictness.
+    Returns best dict (same as choose_global_minimum_samples) + 'used_nh_min',
+    or raises ValueError if nothing is feasible even at nh_min=0.
+    """
+    last_exception = None
+
+    # Build the actual sequence, starting from nh_min_start (then remaining fallbacks)
+    seq = [nh_min_start] + [x for x in fallback_sequence if x != nh_min_start]
+
+    for nh_min in seq:
+        try:
+            best = choose_global_minimum_samples(
+                data=data,
+                H_max=H_max,
+                nh_min=nh_min,
+                aimed_Svar=aimed_Svar,
+                minDistance=minDistance,
+                kernel_size=kernel_size,
+                n_sim=n_sim,
+                n_max=n_max,
+                max_attempts=max_attempts,
+                prefer_lower_H=prefer_lower_H,
+            )
+
+            if best is not None:
+                best["used_nh_min"] = nh_min
+                return best
+
+        except Exception as e:
+            # In case find_minimum_samples_for_H throws, we keep going
+            last_exception = e
+            continue
+
+    # Nothing worked
+    msg = (
+        f"No feasible sampling design found even after relaxing nh_min to 0. "
+        f"Try: (1) reduce H_max, (2) reduce minDistance, (3) increase n_max/max_attempts, "
+        f"(4) check if the area is too small / too few valid pixels."
+    )
+    raise ValueError(msg) from last_exception

@@ -4,11 +4,15 @@ import pandas as pd
 from rasterio.mask import mask
 
 import stratify
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
 
 
 def extract_to_csv():
-    mean_file = "/home/marliana/shared_folder/CarbonApp/output/clipped_SOC_mean.tif"
-    var_file  = "/home/marliana/shared_folder/CarbonApp/output/clipped_SOC_var.tif"
+    mean_file = OUTPUT_DIR / "clipped_SOC_mean.tif"
+    var_file  = OUTPUT_DIR / "clipped_SOC_var.tif"
 
     with rio.open(mean_file) as src_mean, rio.open(var_file) as src_var:
         mean = src_mean.read(1)
@@ -48,5 +52,5 @@ def extract_to_csv():
     })
 
     # ---- save to csv ----
-    out_csv = "/home/marliana/shared_folder/CarbonApp/output/SOC_points.csv"
+    out_csv = OUTPUT_DIR / "SOC_points.csv"
     df.to_csv(out_csv, index=False)
