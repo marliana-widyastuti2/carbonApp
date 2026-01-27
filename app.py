@@ -258,6 +258,8 @@ if st.session_state.get("results_ready", False):
 
     st.subheader("Sampling result")
     # st.write("Optimal design:", st.session_state["optimal_n"])
+
+    best = st.session_state.get("best")
     c1, c2, c3, c4 = st.columns(4)
 
     c1.metric("Strata (H)", best["n_strata"])
