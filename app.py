@@ -226,7 +226,7 @@ if run_btn:
                 strata_df = best["strata_df"]
                 samp_df   = best["samp_df"] 
                 # Extra info for Streamlit UI:
-                # used_nh_min = best["used_nh_min"]      
+                used_nh_min = best["used_nh_min"]      
 
                 fig3 = stratify.plot_stratum_grid_fig(strata_df, "strata", samp_df, plot_title="Sampling points over strata")
 
