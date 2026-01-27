@@ -1,3 +1,8 @@
 data/**
 output/**
 __pycache__/**
+streamlit.log
+tunnel.log
+carbonApp.spec
+cloudflared**
+launcher**
