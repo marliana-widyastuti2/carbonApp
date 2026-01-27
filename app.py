@@ -20,7 +20,7 @@ from pyproj import CRS
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
-
+DST_CRS = CRS.from_epsg(32755)
 
 st.set_page_config(page_title="SamplingApp", layout="centered")
 st.title("Optimised Sampling Design")
@@ -91,7 +91,7 @@ def read_vector_upload(uploaded_file) -> gpd.GeoDataFrame:
 
 def _calculate_area_ha() -> float:
     gdf = read_vector_upload(uploaded)
-    DST_CRS = CRS.from_epsg(32755)
+
     if gdf.empty:
         raise ValueError("Vector file has no features.")
     if gdf.crs is None:
@@ -200,8 +200,11 @@ if run_btn:
                 mean, var = stratify.overall_mean_variance(dataset)
 
                 # store quick plots too if you want them persistent
-                fig1 = stratify.plot_continuous_data_fig(dataset, "Val", plot_title=f"Estimated SOC at 0-5 cm depth [average = {mean:.2f}%]")
-                fig2 = stratify.plot_continuous_data_fig(dataset, "Var", plot_title=f"Variance of estimated SOC at 0-5 cm depth [average = {var:.2f}%²]")
+                fig1 = stratify.plot_continuous_data_fig(dataset, "Val", 
+                                                         plot_title=f"Estimated SOC at 0-5 cm depth [average = {mean:.2f}%]",
+                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
+                fig2 = stratify.plot_continuous_data_fig(dataset, "Var", plot_title=f"Variance of estimated SOC at 0-5 cm depth [average = {var:.2f}%²]",
+                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
 
                 st.pyplot(fig1)
                 st.pyplot(fig2)
