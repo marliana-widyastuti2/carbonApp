@@ -214,7 +214,7 @@ if run_btn:
                 best = stratify.choose_global_minimum_samples(
                     dataset,
                     H_max=7,
-                    nh_min_start=3,
+                    nh_min=3,
                     aimed_Svar=var*0.02,
                     minDistance=50,
                 )
