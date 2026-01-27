@@ -208,7 +208,7 @@ if run_btn:
 
                 st.metric(f"Target sampling variance (%²):", f"{var*0.02:.4f}")
 
-                best = stratify.choose_global_minimum_samples(
+                best = stratify.choose_global_minimum_samples_with_fallback(
                     dataset,
                     H_max=7,
                     nh_min=3,
