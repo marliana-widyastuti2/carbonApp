@@ -45,9 +45,7 @@ def estimate_pixel_area(df):
     return total_area, pixel_area
 
 ## Plotting function
-def plot_continuous_data_fig(dataset, column_to_plot, plot_title="Value", figsize=(15, 8),
-                             gdf=None, raster_crs=None,  # e.g. "EPSG:32755"
-                             ):
+def plot_continuous_data_fig(dataset, column_to_plot, plot_title="Value", figsize=(15, 8)):
     grid = dataset.pivot(index="Y", columns="X", values=column_to_plot).sort_index(ascending=False)
     raster = grid.to_numpy(dtype=float)
 
@@ -60,18 +58,6 @@ def plot_continuous_data_fig(dataset, column_to_plot, plot_title="Value", figsiz
         extent=[x_coords.min(), x_coords.max(), y_coords.min(), y_coords.max()]
     )
     fig.colorbar(im, ax=ax)
-        # ---- overlay shapefile if provided ----
-    if gdf is not None:
-        gdf_plot = gdf.copy()
-
-        if raster_crs is not None and gdf_plot.crs != raster_crs:
-            gdf_plot = gdf_plot.to_crs(raster_crs)
-
-        gdf_plot.boundary.plot(
-            ax=ax,
-            edgecolor="red",
-            linewidth=2,
-        )
     ax.set_title(plot_title)
     fig.tight_layout()
     return fig
