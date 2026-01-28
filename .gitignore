@@ -3,6 +3,7 @@ output/**
 __pycache__/**
 streamlit.log
 tunnel.log
+*.log
 carbonApp.spec
 cloudflared**
 launcher**
