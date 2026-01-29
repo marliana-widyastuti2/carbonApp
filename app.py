@@ -106,22 +106,34 @@ def _calculate_area_ha() -> float:
 
     return area_ha
 
-def _clip_raster(path_raster_in: str, path_raster_out: str, crop: bool, all_touched: bool) -> None:
+def _clip_raster(
+    path_raster_in: str,
+    path_raster_out: str,
+    crop: bool,
+    all_touched: bool,
+    buffer_m: float = 0.0,           # <-- NEW
+) -> None:
     gdf = read_vector_upload(uploaded)
     if gdf.empty:
         raise ValueError("Vector file has no features.")
 
-    # dissolve to one geometry
-    geom = gdf.geometry.unary_union
+    if gdf.crs is None:
+        raise ValueError("Shapefile CRS missing (.prj missing).")
 
     with rasterio.open(path_raster_in) as src:
-        if gdf.crs is None:
-            raise ValueError("Shapefile CRS missing (.prj missing).")
         if src.crs is None:
             raise ValueError("Raster CRS missing.")
+
+        # reproject vector to raster CRS (so buffer is in the same units as raster CRS)
         if gdf.crs != src.crs:
-            gdf2 = gdf.to_crs(src.crs)
-            geom = gdf2.geometry.unary_union
+            gdf = gdf.to_crs(src.crs)
+
+        # dissolve to one geometry
+        geom = gdf.geometry.unary_union
+
+        # apply buffer (in CRS units; for EPSG:32755 this is meters)
+        if buffer_m and buffer_m != 0:
+            geom = geom.buffer(buffer_m)
 
         out_image, out_transform = mask(
             src,
@@ -139,6 +151,7 @@ def _clip_raster(path_raster_in: str, path_raster_out: str, crop: bool, all_touc
             "transform": out_transform
         })
 
+        # ensure nodata exists
         if out_meta.get("nodata", None) is None:
             if "float" in str(out_meta["dtype"]).lower():
                 out_meta["nodata"] = -9999.0
@@ -163,6 +176,14 @@ def clear_results():
     ]:
         st.session_state.pop(k, None)
 
+def smart_format(x, fixed_decimals=4, sci_threshold=1e-3):
+    if x == 0:
+        return "0"
+    if abs(x) < sci_threshold:
+        return f"{x:.2e}"
+    return f"{x:.{fixed_decimals}f}"
+
+
 
 # --- RUN BLOCK: compute and store results ---
 if run_btn:
@@ -178,18 +199,18 @@ if run_btn:
 
                 ## area calc (not used in sampling, just informative)
                 area_ha = _calculate_area_ha()
-                st.metric(f"Area of Farm (ha)", f"{area_ha:.2f}")
+                st.metric(f"Area of Farm (ha)", smart_format(area_ha, fixed_decimals=2, sci_threshold=1e-3))
 
                 # clip rasters
-                meanSOC_in = DATA_DIR / "SOC_AU/SOC_000_005_EV_32755.tif"
+                meanSOC_in = DATA_DIR / "SOC_AU/SOC_0_100_stock_clipped30m.tif"
                 meanSOC_out = OUTPUT_DIR / "clipped_SOC_mean.tif"
                 _clip_raster(str(meanSOC_in), str(meanSOC_out),
-                             crop=crop_to_geom, all_touched=all_touched)
+                             crop=crop_to_geom, all_touched=all_touched, buffer_m=15)
 
-                varSOC_in = DATA_DIR / "SOC_AU/SOC_000_005_VAR_32755.tif"
+                varSOC_in = DATA_DIR / "SOC_AU/SOC_0_100_var_clipped30m.tif"
                 varSOC_out = OUTPUT_DIR / "clipped_SOC_var.tif"
                 _clip_raster(str(varSOC_in), str(varSOC_out),
-                             crop=crop_to_geom, all_touched=all_touched)
+                             crop=crop_to_geom, all_touched=all_touched, buffer_m=15)
 
                 # extract points
                 utils.extract_to_csv()
@@ -201,22 +222,26 @@ if run_btn:
 
                 # store quick plots too if you want them persistent
                 fig1 = stratify.plot_continuous_data_fig(dataset, "Val", 
-                                                         plot_title=f"Estimated SOC at 0-5 cm depth [average = {mean:.2f}%]",
+                                                         plot_title=f"Estimated Carbon Stock at 0-100 cm depth [average = {mean:.2f} ton]",
                                                          gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
-                fig2 = stratify.plot_continuous_data_fig(dataset, "Var", plot_title=f"Variance of estimated SOC at 0-5 cm depth [average = {var:.2f}%²]",
+                fig2 = stratify.plot_continuous_data_fig(dataset, "Var", plot_title=f"Variance of estimated Carbon Stock at 0-100 cm depth [average = {var:.2f} ton²]",
                                                          gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
 
                 st.pyplot(fig1)
                 st.pyplot(fig2)
 
-                st.metric(f"Target sampling variance (%²):", f"{var*0.02:.4f}")
+                st.metric(f"Target sampling variance (ton²):", 
+                          smart_format(var*0.02, fixed_decimals=4, sci_threshold=1e-3))
 
-                best = stratify.choose_global_minimum_samples_with_fallback(
+                best = stratify.choose_global_minimum_samples_by_n(
                     dataset,
                     H_max=7,
-                    nh_min_start=3,
+                    area=area_ha,
+                    nh_min=3,
                     aimed_Svar=var*0.02,
-                    minDistance=50,
+                    minDistance=25,
+                    geom_boundary=read_vector_upload(uploaded).to_crs(DST_CRS),
+                    edge_buffer=15,
                 )
 
                 if best is None:
@@ -224,11 +249,10 @@ if run_btn:
                     st.stop()
 
                 strata_df = best["strata_df"]
-                samp_df   = best["samp_df"] 
-                # Extra info for Streamlit UI:
-                used_nh_min = best["used_nh_min"]      
+                samp_df   = best["samp_df"]  
 
-                fig3 = stratify.plot_stratum_grid_fig(strata_df, "strata", samp_df, plot_title="Sampling points over strata")
+                fig3 = stratify.plot_stratum_grid_fig(strata_df, "strata", samp_df, plot_title="Sampling points over strata",
+                                                      gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
 
                 optimal_n = pd.Series({
                     "n_strata": best["n_strata"],
@@ -267,8 +291,10 @@ if st.session_state.get("results_ready", False):
 
     c1.metric("Strata (H)", best["n_strata"])
     c2.metric("Total samples", best["n_samples"])
-    c3.metric("Sampling variance (%²)", f'{best["sampling_variance"]:.4f}')
-    c4.metric("Sampling error (%)", f'{float(np.sqrt(best["sampling_variance"])):.3f}')
+    c3.metric("Sampling variance (ton²)", 
+              smart_format(best["sampling_variance"], fixed_decimals=4, sci_threshold=1e-3))
+    c4.metric("Sampling error (ton)", 
+              smart_format(float(np.sqrt(best["sampling_variance"])), fixed_decimals=4, sci_threshold=1e-3))
 
     st.session_state["fig_sampling"]
 

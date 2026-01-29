@@ -1,0 +1,13 @@
+Check the PID of a running code: 
+
+ps -u marliana | grep CarbonApp
+pgrep -af app.py
+
+how to run:
+
+conda activate app
+cd shared_folder/CarbonApp/
+
+run app.py after modify the code:
+
+nohup streamlit run app.py --server.address 127.0.0.1 --server.port 8501 > streamlit.log 2>&1 &

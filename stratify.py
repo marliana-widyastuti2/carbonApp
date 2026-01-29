@@ -17,6 +17,7 @@ import matplotlib.colors as mcolors
 from skimage.util import view_as_windows
 from scipy.spatial import distance_matrix
 from scipy.spatial import cKDTree
+import geopandas as gpd
 
 random.seed(42)
 warnings.filterwarnings("ignore")
@@ -46,8 +47,7 @@ def estimate_pixel_area(df):
 
 ## Plotting function
 def plot_continuous_data_fig(dataset, column_to_plot, plot_title="Value", figsize=(15, 8),
-                             gdf=None, raster_crs=None,  # e.g. "EPSG:32755"
-                             ):
+                             gdf=None, raster_crs=None):
     grid = dataset.pivot(index="Y", columns="X", values=column_to_plot).sort_index(ascending=False)
     raster = grid.to_numpy(dtype=float)
 
@@ -57,27 +57,33 @@ def plot_continuous_data_fig(dataset, column_to_plot, plot_title="Value", figsiz
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(
         raster, cmap="viridis", origin="upper",
-        extent=[x_coords.min(), x_coords.max(), y_coords.min(), y_coords.max()]
+        extent=[x_coords.min(), x_coords.max(), y_coords.min(), y_coords.max()],
+        aspect="equal"  # important
     )
     fig.colorbar(im, ax=ax)
-        # ---- overlay shapefile if provided ----
+
+    # overlay shapefile if provided
     if gdf is not None:
         gdf_plot = gdf.copy()
-
         if raster_crs is not None and gdf_plot.crs != raster_crs:
             gdf_plot = gdf_plot.to_crs(raster_crs)
 
-        gdf_plot.boundary.plot(
-            ax=ax,
-            edgecolor="red",
-            linewidth=2,
-        )
+        gdf_plot.boundary.plot(ax=ax, edgecolor="red", linewidth=2)
+
     ax.set_title(plot_title)
     fig.tight_layout()
     return fig
 
-def plot_stratum_grid_fig(dataset, column_of_strata, sampling_points=None,
-                          figsize=(15, 8), plot_title="Stratification"):
+
+def plot_stratum_grid_fig(
+    dataset,
+    column_of_strata,
+    sampling_points=None,
+    figsize=(15, 8),
+    plot_title="Stratification",
+    gdf=None,                 # <-- NEW
+    raster_crs=None,          # <-- NEW
+):
     grid = dataset.pivot(index="Y", columns="X", values=column_of_strata).sort_index(ascending=False)
     raster = grid.to_numpy(dtype=float)
 
@@ -95,15 +101,29 @@ def plot_stratum_grid_fig(dataset, column_of_strata, sampling_points=None,
     fig, ax = plt.subplots(figsize=figsize)
     ax.imshow(
         raster, cmap=cmap, norm=norm, origin="upper",
-        extent=[x_coords.min(), x_coords.max(), y_coords.min(), y_coords.max()]
+        extent=[x_coords.min(), x_coords.max(), y_coords.min(), y_coords.max()],
+        aspect="equal"  # <-- match continuous plot
     )
 
+    # overlay shapefile boundary (same as continuous plot)
+    if gdf is not None:
+        gdf_plot = gdf.copy()
+        if raster_crs is not None and gdf_plot.crs != raster_crs:
+            gdf_plot = gdf_plot.to_crs(raster_crs)
+        gdf_plot.boundary.plot(ax=ax, edgecolor="red", linewidth=2, zorder=6)
+
+    # sample points
+    if sampling_points is not None and len(sampling_points) > 0:
+        ax.scatter(
+            sampling_points["X"], sampling_points["Y"],
+            color="black", s=10, label="Sample Points", zorder=7
+        )
+
+    # legend for strata (and optional sample points)
     handles = [mpatches.Patch(color=stratum_to_color[val], label=f"Stratum {val}")
                for val in stratum_labels]
-
     if sampling_points is not None and len(sampling_points) > 0:
-        ax.scatter(sampling_points["X"], sampling_points["Y"],
-                   color="black", s=10, label="Sample Points", zorder=5)
+        handles.append(mpatches.Patch(color="black", label="Sample Points"))
 
     ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.01, 0.5), borderaxespad=0.)
     ax.set_title(plot_title)
@@ -443,295 +463,205 @@ def calculate_stratum(dataset, strata_column, n_samples=40):
     Varh = sum(Wh2*Sh2*onef/groupNonZero['nh'])
     return group[['h', 'nh']], Varh
 
-def where_to_sample_in_stratum(stratum_dataset, min_distance=float('-inf'), max_distance=float('inf'), nh=5):
+def where_to_sample_in_stratum(
+    stratum_dataset,
+    min_distance=0,
+    nh=5,
+    max_tries=100,
+    geom_boundary=None,
+    edge_buffer=0,
+):
     df = stratum_dataset.copy()
+
+    # --- Normalize boundary to a single shapely geometry ---
+    if geom_boundary is None:
+        safe_geom = None
+    else:
+        # If user passed GeoDataFrame/GeoSeries, dissolve to shapely geometry
+        if isinstance(geom_boundary, (gpd.GeoDataFrame, gpd.GeoSeries)):
+            geom_boundary = geom_boundary.unary_union
+
+        # If someone passed a pandas Series, try dissolving its values
+        if hasattr(geom_boundary, "values") and not hasattr(geom_boundary, "geom_type"):
+            # likely a Series of geometries
+            geom_boundary = gpd.GeoSeries(list(geom_boundary)).unary_union
+
+        safe_geom = geom_boundary
+
+        if edge_buffer and edge_buffer > 0:
+            safe_geom = safe_geom.buffer(-edge_buffer)
+
+            # IMPORTANT: safe_geom is shapely now, so is_empty is a bool
+            if safe_geom.is_empty:
+                raise ValueError(
+                    f"edge_buffer={edge_buffer} too large: boundary becomes empty after inward buffer."
+                )
+
+    # --- prefilter candidates to safe area (inside & away from edge) ---
+    if safe_geom is not None:
+        inside_mask = df.apply(
+            lambda r: Point(r["X"], r["Y"]).covered_by(safe_geom),
+            axis=1
+        )
+        df = df[inside_mask].copy()
+        if df.empty:
+            raise ValueError("No candidate pixels remain after applying boundary + edge buffer.")
+
     sampled_points = []
 
-    max_tries = 100
-    for sa in range(nh):
-        
+    for _ in range(nh):
         for _ in range(max_tries):
-            # Randomly select a valid pixel
-            valid_indices = df['id']
-            idx = np.random.choice(valid_indices)
-            samp = df[df['id'] == idx]
-            x, y = samp['X'].values[0], samp['Y'].values[0]
-            
-            # Check distance constraints
+            idx = np.random.choice(df["id"].values)
+            samp = df[df["id"] == idx].iloc[0]
+            x, y = samp["X"], samp["Y"]
             new_point = Point(x, y)
-            if (
-                all(new_point.distance(Point(px, py)) >= min_distance for px, py in sampled_points) and
-                all(new_point.distance(Point(px, py)) <= max_distance for px, py in sampled_points)
-            ):
+
+            if all(new_point.distance(Point(px, py)) >= min_distance for px, py in sampled_points):
                 sampled_points.append([x, y])
                 break
         else:
-            raise RuntimeError("Failed to generate a valid point satisfying constraints.")
-
-    sampled_points = pd.DataFrame(sampled_points, columns=['X', 'Y'])
-    sampled_points = sampled_points.merge(df, on=['X', 'Y'], how='left')
-    return sampled_points
-
-def optimal_sample_size(dataset, min_H=2, max_H=6, min_n=5, max_n=40, min_nh=3, diff=2, round_error=6):
-    simulation = []
-    for h in range(min_H, max_H + 1):
-        temp_df = dataset.copy()
-        temp_df["strata"] = stratify_major2D(temp_df, kernel_size=3, n_strata=h)
-
-        for n in range(min_n, max_n + 1):
-            g, Svar = calculate_stratum(temp_df, strata_column="strata", n_samples=n)
-            nh = g["nh"].to_list()
-            val_stratum = g["h"].to_list()
-            simulation.append([h, n, Svar, nh, val_stratum])
-
-    results_df = pd.DataFrame(simulation, columns=["n_strata", "n_samples", "sampling_variance", "nh", "val_stratum"])
-    results_df = results_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["sampling_variance"])
-    results_df["sampling_error"] = np.sqrt(results_df["sampling_variance"])
-    results_df["sampling_error_r"] = results_df["sampling_error"].round(round_error)
-
-    # --- try your "repeat error" idea but with rounding ---
-    n_diff, count_diff = np.unique(results_df["sampling_error_r"], return_counts=True)
-    subset_df = results_df[results_df["sampling_error_r"].isin(n_diff[count_diff > diff])].copy()
-
-    # if subset empty, fall back to all results
-    if subset_df.empty:
-        subset_df = results_df.copy()
-
-    subset_df["satisfy_nh"] = subset_df["nh"].apply(lambda x: all(val >= min_nh for val in x))
-    feasible = subset_df[subset_df["satisfy_nh"]].copy()
-
-    if feasible.empty:
-        raise ValueError("No feasible design meets min_nh. Lower min_nh or increase max_n/max_H.")
-
-    # Choose smallest n_samples, then smallest variance
-    feasible = feasible.sort_values(["n_samples", "sampling_variance"], ascending=[True, True])
-    return feasible.iloc[0]
-
-def get_sampling_points_return(data, optimal_result, min_distance=50):
-    """
-    Returns:
-        strata_df: dataframe with strata column
-        samp_df: sampled points dataframe
-    """
-    H = int(optimal_result["n_strata"])
-    n_total = int(optimal_result["n_samples"])
-    nh = optimal_result["nh"]
-    stratum_vals = optimal_result["val_stratum"]
-
-    temp_df = data.copy()
-    temp_df["strata"] = stratify_major2D(temp_df, kernel_size=3, n_strata=H)
-
-    samp = []
-    for i in range(H):
-        h = stratum_vals[i]
-        nh_i = nh[i]
-        subdf = temp_df.query(f"strata == {h}").reset_index(drop=True)
-        samp_h = where_to_sample_in_stratum(subdf, min_distance=min_distance, nh=nh_i)
-        samp.append(samp_h)
-
-    samp_df = pd.concat(samp, ignore_index=True)
-    strata_df = temp_df.copy()
-
-    return strata_df, samp_df
-
-
-def _min_pairwise_distance_xy(df):
-    """Fast minimum pairwise distance between points in df[['X','Y']] using KDTree."""
-    pts = df[["X", "Y"]].to_numpy(dtype=float)
-    if pts.shape[0] < 2:
-        return np.inf
-    tree = cKDTree(pts)
-    dists, _ = tree.query(pts, k=2)  # nearest neighbor excluding itself
-    return float(np.min(dists[:, 1]))
-
-
-def find_minimum_samples_for_H(
-    data,
-    H,
-    nh_min=3,
-    aimed_Svar=0.001,
-    minDistance=50,
-    kernel_size=3,
-    n_sim=100,
-    n_start=None,
-    n_max=100,
-    max_attempts=100,
-):
-    """
-    For a fixed H, find the minimum total n_samples satisfying:
-      - Svar <= aimed_Svar
-      - all nh >= nh_min
-      - sampled points satisfy minDistance
-    Returns dict with strata_df and samp_df, or None if not feasible up to n_max.
-    """
-    temp_df = data.copy()
-    temp_df["strata"] = stratify_major2D(
-        dataframe=temp_df,
-        kernel_size=kernel_size,
-        n_strata=H,
-        n_sim=n_sim,
-    )
-
-    # starting point: at least nh_min per stratum in theory
-    if n_start is None:
-        n_start = max(nh_min * H, nh_min)
-
-    # Pre-split for repeated sampling attempts (reused across n)
-    # We'll fill later once we know which strata values are used
-    for n_samples in range(n_start, n_max + 1):
-        g, Svar = calculate_stratum(temp_df, strata_column="strata", n_samples=n_samples)
-        g = g.sort_values("h")
-
-        nh = g["nh"].to_list()
-        stratum = g["h"].to_list()
-
-        if Svar > aimed_Svar:
-            continue
-        if any(v < nh_min for v in nh):
-            continue
-
-        strata_groups = {h: temp_df[temp_df["strata"] == h].reset_index(drop=True) for h in stratum}
-
-        # Try to build a valid sample set meeting minDistance
-        samp_df = None
-        for _ in range(max_attempts):
-            parts = []
-            ok = True
-
-            for h, nh_i in zip(stratum, nh):
-                subdf = strata_groups[h]
-                try:
-                    samp_h = where_to_sample_in_stratum(subdf, min_distance=minDistance, nh=nh_i)
-                except RuntimeError:
-                    ok = False
-                    break
-                parts.append(samp_h)
-
-            if not ok:
-                continue
-
-            samp_try = pd.concat(parts, ignore_index=True)
-            min_dist = _min_pairwise_distance_xy(samp_try)
-
-            if min_dist >= minDistance:
-                samp_df = samp_try
-                break
-
-        if samp_df is None:
-            continue
-
-        return {
-            "n_strata": int(H),
-            "n_samples": int(n_samples),
-            "sampling_variance": float(Svar),
-            "nh": nh,
-            "val_stratum": stratum,
-            "strata_df": temp_df,   # ✅ keep strata_df
-            "samp_df": samp_df,     # ✅ keep samp_df
-            "min_dist": float(_min_pairwise_distance_xy(samp_df)),
-        }
-
-    return None
-
-
-def choose_global_minimum_samples(
-    data,
-    H_max=7,
-    nh_min=3,
-    aimed_Svar=0.001,
-    minDistance=50,
-    kernel_size=3,
-    n_sim=100,
-    n_max=100,
-    max_attempts=100,
-    prefer_lower_H=True,
-):
-    """
-    Search across H (from 3..H_max) and return the design with MINIMUM total n_samples
-    that satisfies all constraints. Keeps strata_df and samp_df.
-    Returns dict or None.
-    """
-    best = None
-
-    for H in range(3, H_max + 1):
-        res = find_minimum_samples_for_H(
-            data=data,
-            H=H,
-            nh_min=nh_min,
-            aimed_Svar=aimed_Svar,
-            minDistance=minDistance,
-            kernel_size=kernel_size,
-            n_sim=n_sim,
-            n_max=n_max,
-            max_attempts=max_attempts,
-        )
-
-        if res is None:
-            continue
-
-        if (best is None) or (res["n_samples"] < best["n_samples"]):
-            best = res
-        elif res["n_samples"] == best["n_samples"]:
-            if prefer_lower_H:
-                if res["n_strata"] < best["n_strata"]:
-                    best = res
-            else:
-                if res["n_strata"] > best["n_strata"]:
-                    best = res
-
-    return best
-
-def choose_global_minimum_samples_with_fallback(
-    data,
-    H_max=7,
-    nh_min_start=3,
-    aimed_Svar=0.001,
-    minDistance=50,
-    kernel_size=3,
-    n_sim=100,
-    n_max=100,
-    max_attempts=100,
-    prefer_lower_H=True,
-    fallback_sequence=(3, 2, 1, 0),
-):
-    """
-    Try choose_global_minimum_samples using nh_min in descending strictness.
-    Returns best dict (same as choose_global_minimum_samples) + 'used_nh_min',
-    or raises ValueError if nothing is feasible even at nh_min=0.
-    """
-    last_exception = None
-
-    # Build the actual sequence, starting from nh_min_start (then remaining fallbacks)
-    seq = [nh_min_start] + [x for x in fallback_sequence if x != nh_min_start]
-
-    for nh_min in seq:
-        try:
-            best = choose_global_minimum_samples(
-                data=data,
-                H_max=H_max,
-                nh_min=nh_min,
-                aimed_Svar=aimed_Svar,
-                minDistance=minDistance,
-                kernel_size=kernel_size,
-                n_sim=n_sim,
-                n_max=n_max,
-                max_attempts=max_attempts,
-                prefer_lower_H=prefer_lower_H,
+            raise RuntimeError(
+                "Failed to generate a valid point (try smaller min_distance/edge_buffer or increase max_tries)."
             )
 
-            if best is not None:
-                best["used_nh_min"] = nh_min
-                return best
+    sampled_points = pd.DataFrame(sampled_points, columns=["X", "Y"])
+    sampled_points = sampled_points.merge(df, on=["X", "Y"], how="left")
+    return sampled_points
 
-        except Exception as e:
-            # In case find_minimum_samples_for_H throws, we keep going
-            last_exception = e
-            continue
+def _min_pairwise_distance_xy(df):
+    coords = df[['X', 'Y']].to_numpy()
+    if len(coords) < 2:
+        return float('inf')
+    tree = cKDTree(coords)
+    distances, _ = tree.query(coords, k=2)  # k=2 to get the nearest neighbor (excluding self)
+    min_distance = np.min(distances[:, 1])  # Exclude the zero distance to self
+    return min_distance
 
-    # Nothing worked
-    msg = (
-        f"No feasible sampling design found even after relaxing nh_min to 0. "
-        f"Try: (1) reduce H_max, (2) reduce minDistance, (3) increase n_max/max_attempts, "
-        f"(4) check if the area is too small / too few valid pixels."
-    )
-    raise ValueError(msg) from last_exception
+def choose_global_minimum_samples_by_n(
+    data,
+    H_max=7,
+    area=None,
+    nh_min=3,
+    aimed_Svar=0.001,
+    minDistance=50,
+    kernel_size=3,
+    n_sim=100,
+    max_attempts=100,
+    prefer_lower_H=True,
+    packing_factor=0.5,   # more conservative than 1.0
+    geom_boundary=None, 
+    edge_buffer=0,
+):
+    """
+    Guaranteed global minimum n_samples:
+    - Loop n_samples from smallest to largest
+    - For each n_samples, try all H
+    - Return immediately when at least one feasible design exists for that n_samples
+      (pick best among H using tie rules).
+    """
+    if area is None or area <= 0:
+        raise ValueError("area must be provided in hectares and > 0.")
+    if H_max < 3:
+        raise ValueError("H_max must be >= 3.")
+
+    # Conservative-ish physical cap (still approximate)
+    n_max = int(max(1, packing_factor * area * 10000 / (minDistance * minDistance)))
+
+    # Smallest possible n overall occurs at H=3 (since you require H>=3)
+    n_min = nh_min * 3
+
+    # --- Precompute strata maps for each H once (big speed-up) ---
+    strata_cache = {}
+    for H in range(3, H_max + 1):
+        temp_df = data.copy()
+        temp_df["strata"] = stratify_major2D(
+            dataframe=temp_df,
+            kernel_size=kernel_size,
+            n_strata=H,
+            n_sim=n_sim,
+        )
+        # Cache grouped pixels per stratum id for faster sampling later
+        strata_ids = sorted(temp_df["strata"].dropna().unique().tolist())
+        groups = {h: temp_df[temp_df["strata"] == h].reset_index(drop=True) for h in strata_ids}
+        strata_cache[H] = (temp_df, groups)
+
+    # --- Global search: n first, then H ---
+    for n_samples in range(n_min, n_max + 1):
+        feasible_designs = []
+
+        for H in range(3, H_max + 1):
+            # cannot allocate < nh_min per stratum
+            if n_samples < nh_min * H:
+                continue
+
+            temp_df, strata_groups = strata_cache[H]
+
+            g, Svar = calculate_stratum(temp_df, strata_column="strata", n_samples=n_samples)
+            g = g.sort_values("h")
+
+            nh = g["nh"].to_list()
+            stratum = g["h"].to_list()
+
+            # statistical + minimum-per-stratum constraints
+            if Svar > aimed_Svar:
+                continue
+            if any(v < nh_min for v in nh):
+                continue
+
+            # Try to place points satisfying minDistance
+            samp_df = None
+            for _ in range(max_attempts):
+                parts = []
+                ok = True
+
+                for h, nh_i in zip(stratum, nh):
+                    subdf = strata_groups.get(h)
+                    if subdf is None or len(subdf) == 0:
+                        ok = False
+                        break
+                    try:
+                        samp_h = where_to_sample_in_stratum(subdf, min_distance=minDistance, 
+                                                            nh=nh_i, edge_buffer=edge_buffer,
+                                                            geom_boundary=geom_boundary)
+                    except RuntimeError:
+                        ok = False
+                        break
+                    parts.append(samp_h)
+
+                if not ok:
+                    continue
+
+                samp_try = pd.concat(parts, ignore_index=True)
+                min_dist = _min_pairwise_distance_xy(samp_try)
+
+                if min_dist >= minDistance:
+                    samp_df = samp_try
+                    break
+
+            if samp_df is None:
+                continue
+
+            feasible_designs.append({
+                "n_strata": int(H),
+                "n_samples": int(n_samples),
+                "sampling_variance": float(Svar),
+                "nh": nh,
+                "val_stratum": stratum,
+                "strata_df": temp_df,   # keep
+                "samp_df": samp_df,     # keep
+                "min_dist": float(_min_pairwise_distance_xy(samp_df)),
+            })
+
+        # ✅ Early stop at the FIRST n_samples that yields any feasible design
+        if feasible_designs:
+            # choose best among H for this minimal n_samples
+            feasible_designs.sort(
+                key=lambda d: (
+                    d["n_samples"],                              # (all equal here)
+                    d["n_strata"] if prefer_lower_H else -d["n_strata"],
+                    d["sampling_variance"],                      # smaller is better
+                )
+            )
+            return feasible_designs[0]
+
+    return None
