@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import tempfile
 from turtle import home, pd
@@ -30,6 +31,7 @@ uploaded = st.file_uploader(
     "Upload Farm boundary (ZIP Shapefile / GeoJSON / KML / KMZ)",
     type=["zip", "geojson", "json", "kml", "kmz"]
 )
+upload_name = Path(uploaded.name).stem
 
 
 # --- Output options ---
@@ -202,12 +204,12 @@ if run_btn:
                 st.metric(f"Area of Farm (ha)", smart_format(area_ha, fixed_decimals=2, sci_threshold=1e-3))
 
                 # clip rasters
-                meanSOC_in = DATA_DIR / "SOC_AU/SOC_0_100_stock_clipped30m.tif"
+                meanSOC_in = DATA_DIR / "SOC_AU/SOC_0_100_stock_tonclipped_30m.tif"
                 meanSOC_out = OUTPUT_DIR / "clipped_SOC_mean.tif"
                 _clip_raster(str(meanSOC_in), str(meanSOC_out),
                              crop=crop_to_geom, all_touched=all_touched, buffer_m=15)
 
-                varSOC_in = DATA_DIR / "SOC_AU/SOC_0_100_var_clipped30m.tif"
+                varSOC_in = DATA_DIR / "SOC_AU/SOC_0_100_variance_tonclipped_30m.tif"
                 varSOC_out = OUTPUT_DIR / "clipped_SOC_var.tif"
                 _clip_raster(str(varSOC_in), str(varSOC_out),
                              crop=crop_to_geom, all_touched=all_touched, buffer_m=15)
@@ -233,7 +235,7 @@ if run_btn:
                 st.metric(f"Target sampling variance (ton²):", 
                           smart_format(var*0.02, fixed_decimals=4, sci_threshold=1e-3))
 
-                best = stratify.choose_global_minimum_samples_by_n(
+                best = stratify.choose_best_by_lowest_svar_across_H(
                     dataset,
                     H_max=7,
                     area=area_ha,
@@ -241,7 +243,7 @@ if run_btn:
                     aimed_Svar=var*0.02,
                     minDistance=25,
                     geom_boundary=read_vector_upload(uploaded).to_crs(DST_CRS),
-                    edge_buffer=15,
+                    edge_buffer=5,
                 )
 
                 if best is None:
@@ -259,9 +261,9 @@ if run_btn:
                     "n_samples": best["n_samples"],
                     "sampling_variance": best["sampling_variance"],
                     "sampling_error": float(np.sqrt(best["sampling_variance"])),
-                    "nh": best["nh"],
-                    "val_stratum": best["val_stratum"],
-                    "min_dist": best["min_dist"],
+                    # "nh": best["nh"],
+                    # "val_stratum": best["val_stratum"],
+                    # "min_dist": best["min_dist"],
                 })
 
                 # store results so they persist across reruns
@@ -283,7 +285,7 @@ if run_btn:
 # --- DISPLAY BLOCK: always show if results exist (runs on every rerun) ---
 if st.session_state.get("results_ready", False):
 
-    st.subheader("Sampling result")
+    st.subheader(f"Sampling Results")
     # st.write("Optimal design:", st.session_state["optimal_n"])
 
     best = st.session_state.get("best")
@@ -305,14 +307,20 @@ if st.session_state.get("results_ready", False):
         st.download_button(
             "⬇️ Download stratified dataset (CSV)",
             st.session_state["strata_csv_bytes"],
-            file_name="stratified_dataset.csv",
+            file_name=f"stratified_dataset_{upload_name}.csv",
             mime="text/csv",
         )
     with col2:
         st.download_button(
             "⬇️ Download sampling points (CSV)",
             st.session_state["samp_csv_bytes"],
-            file_name="sampling_points.csv",
+            file_name=f"sampling_points_{upload_name}.csv",
             mime="text/csv",
         )
     st.caption("Coordinates are in **EPSG:32755 (WGS 84 / UTM zone 55S)**, units in meters.")
+
+# --- Footer with last modified date ---
+last_modified = datetime.fromtimestamp(Path(__file__).stat().st_mtime)
+
+st.markdown("---")
+st.caption(f"Last updated: {last_modified:%Y-%m-%d %H:%M}")

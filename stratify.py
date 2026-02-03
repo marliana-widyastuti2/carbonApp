@@ -236,202 +236,148 @@ def stratify_major2D(dataframe, kernel_size=3, n_strata=5, n_sim=100):
     majorDF = pd.merge(oriCoord, filtered_long, on=["X", "Y"], how="left")
     return majorDF["major"].astype("int32")
 
-def create3D(dataframe, n_strata, n_sim):
-    temp_df2 = dataframe.copy()
-    sim = generate_simulated_data(temp_df2, n_sim)
+def smooth_strata_majority(
+    dataframe,
+    strata_col,
+    kernel_size=3,
+):
+    df = dataframe.copy()
 
-    stratified_sim = pd.DataFrame()
-    for col in sim.columns:
-        stratified_sim[col], _ = cumrootfreq(sim[col], n_strata)
-
-    majorDF = temp_df2.merge(stratified_sim, left_index=True, right_index=True)
-
-    list_rasters = []
-    sim_cols = list(stratified_sim.columns)  # ONLY sim_* columns
-    for co in sim_cols:
-        grid = majorDF.pivot(index="Y", columns="X", values=co).sort_index(ascending=False)
-        list_rasters.append(grid.to_numpy(dtype=float))
-
-    arr = np.stack(list_rasters, axis=2)  # (rows, cols, n_sim)
-    return arr
-
-def major3D(arr, size=3):
-    rows, cols, _ = arr.shape
-
-    padded = np.pad(arr, ((1, 1), (1, 1), (0, 0)), mode='constant', constant_values=-9999)
-    padded = np.where(padded == -9999, np.nan, padded).astype(float)
-
-    windows = view_as_windows(padded, (size, size, arr.shape[2])) 
-    windows_reshaped = windows.reshape(rows, cols, -1) 
-
-    def nan_mode(data):
-        out = np.full(data.shape[:2], np.nan)
-        for i in range(data.shape[0]):
-            for j in range(data.shape[1]):
-                vals, counts = np.unique(data[i, j][~np.isnan(data[i, j])], return_counts=True)
-                if counts.size > 0:
-                    out[i, j] = vals[np.argmax(counts)]
-        return out
-
-    majority = nan_mode(windows_reshaped)
-    return majority
-
-def stratify_major3D(dataframe, size=3, n_strata=5, n_sim=100):
-    temp_df1 = dataframe.copy()
-
-    array3D = create3D(dataframe, n_strata, n_sim)
-
-    grid = temp_df1.pivot(index='Y', columns='X', values='Val').sort_index(ascending=False)
+    # pivot to raster
+    grid = (
+        df.pivot(index="Y", columns="X", values=strata_col)
+          .sort_index(ascending=False)
+    )
     raster = grid.to_numpy(dtype=float)
 
-    arrMajor = major3D(array3D, size=size)
+    # apply majority filter
+    filtered = generic_filter(raster, majority_filter, size=kernel_size)
 
-    arrMajor[np.isnan(raster)]=np.nan
-    filtered_df = pd.DataFrame(
-        arrMajor,
-        index=grid.index,     # Y coordinates
-        columns=grid.columns  # X coordinates
+    # back to long format
+    filtered_df = pd.DataFrame(filtered, index=grid.index, columns=grid.columns)
+    filtered_long = filtered_df.stack().reset_index()
+    filtered_long.columns = ["Y", "X", strata_col]
+
+    # merge back
+    out = df.drop(columns=[strata_col]).merge(
+        filtered_long, on=["X", "Y"], how="left"
     )
 
-    # Convert to long format
-    majorDF = filtered_df.stack().reset_index()
-    majorDF.columns = ['Y', 'X', 'major']
+    out[strata_col] = out[strata_col].astype("int32")
+    return out
 
-    mergedDF = pd.merge(temp_df1, majorDF, on=['X', 'Y'], how='left')
-    return mergedDF['major']
+def _grid_from_df(df, col):
+    grid = df.pivot(index="Y", columns="X", values=col).sort_index(ascending=False)
+    return grid, grid.to_numpy()
 
-# Horgan's algorithm
-def geometric(data, n_strata=5):
-    temp = pd.DataFrame({'Val':data})
-    min = temp['Val'].min()
-    max = temp['Val'].max()
+def _df_from_grid(grid, arr, colname):
+    out = pd.DataFrame(arr, index=grid.index, columns=grid.columns)
+    long = out.stack().reset_index()
+    long.columns = ["Y", "X", colname]
+    return long
 
-    bou = []
-    for i in range(n_strata+1):
-        # print(i)
-        cr = math.pow(max/min, 1/n_strata)
-        # print(cr)
-        r= math.pow(cr, i)
-        k=r*min
-        # print(k)
-        bou.append(k)
+def merge_small_strata_by_area_adjacency(df, strata_col, min_share=0.08, max_iter=20):
+    """
+    Merge strata whose total area share < min_share into the dominant adjacent stratum (4-neighborhood).
+    Assumes strata labels are non-negative integers (0,1,2,... or 1,2,...). NaNs allowed.
+    """
+    out = df.copy()
 
-    temp['Bins'] = pd.cut(temp['Val'], bins=bou,  include_lowest=True)
-    return temp.groupby('Bins').ngroup()
+    for _ in range(max_iter):
+        grid, arr = _grid_from_df(out, strata_col)
+        A = arr.astype(float)  # keep NaNs if any
 
-def stratify_random_search(dataframe, n_strata=5, c_precision=0.005, iteration = 100):
-    ## define total number of dataset
-    N = dataframe['Val'].count()
+        valid = ~np.isnan(A)
+        vals = A[valid].astype(np.int32)
 
-    ## Sorted the dataset based on variable value, then extract the index into a new column 'index'.
-    dfSorted = dataframe.copy().sort_values(by='Val')  
-    dfSorted.reset_index(drop=True, inplace=True)
-    dfSorted.reset_index(inplace=True)
+        unique, counts = np.unique(vals, return_counts=True)
+        total = counts.sum()
+        shares = {int(u): c / total for u, c in zip(unique, counts)}
 
-    ## Define initial Stratification using Cum-Root-Freq method
-    dfSorted['crf'], crf_boundary = cumrootfreq(dfSorted['Val'], n_strata) 
+        small = [k for k, s in shares.items() if s < min_share]
+        if not small:
+            break
 
-    ## some inner-functions
-    def find_max_indices_of_boundary_groups(series):
-        max_indices = [0]
-        for idx in range(1, len(series)):
-            if series[idx] != series[idx - 1]:
-                max_indices.append(idx - 1)
-        max_indices.append(len(series) - 1)
-        return max_indices
+        A2 = A.copy()
 
-    ## Using the index boundary to calculate initial of n(a) and nh for each strata
-    def stratifyBound(dataframe, column, boundary):
-        df = dataframe.copy()
-        df['Bins'] = pd.cut(df[column], bins=boundary, include_lowest=True)
-        df['Strata'] = df.groupby('Bins').ngroup()
-        return df
+        for lab in small:
+            mask = valid & (A2.astype(np.int32) == int(lab))
+            if mask.sum() == 0:
+                continue
 
-    def calc_strata(dataset, n_strata, c_precision):
-        df = dataset.copy()
-        ds = df.groupby('Strata').count().iloc[:,1].reset_index()
-        ds.columns = ['Strata', 'Nh']
-        ds['Wh'] = ds['Nh']/N
+            neigh = []
 
-        Ybar = df['Val'].mean()
+            for dy, dx in [(-1,0),(1,0),(0,-1),(0,1)]:
+                shifted = np.full(A2.shape, np.nan, dtype=float)
 
-        YhBar = df.groupby('Strata')['Val'].mean().reset_index()
-        YhBar.columns = ['Strata', 'YhBar']
-        ds = pd.merge(ds, YhBar, on='Strata', how='left')
-        Sh = df.groupby('Strata')['Val'].std().reset_index()
-        Sh.columns = ['Strata', 'Sh']
-        ds = pd.merge(ds, Sh, on='Strata', how='left')
+                y0_src = max(0, -dy)
+                y1_src = A2.shape[0] - max(0, dy)
+                x0_src = max(0, -dx)
+                x1_src = A2.shape[1] - max(0, dx)
 
-        L = n_strata-1                 ### the substract is only adjustment in which python always starts from 0 
-        NL = ds['Nh'][L] 
+                y0_dst = max(0, dy)
+                y1_dst = A2.shape[0] - max(0, -dy)
+                x0_dst = max(0, dx)
+                x1_dst = A2.shape[1] - max(0, -dx)
 
-        otherL = ds[~(ds['Strata'] == L)]
-        otherL['Sh2'] = otherL['Sh'].pow(2)
-        otherL['WhSh'] = otherL['Wh']*otherL['Sh']
-        otherL['WhSh2'] = otherL['Wh']*otherL['Sh2']
+                shifted[y0_dst:y1_dst, x0_dst:x1_dst] = A2[y0_src:y1_src, x0_src:x1_src]
 
-        a = pow(sum(otherL['WhSh']),2)
-        b = pow(Ybar, 2)*pow(c_precision, 2)+(sum(otherL['WhSh2'])/N)
-        n = np.round(NL+(a/b))
+                # boundary pixels of this lab that touch a different (valid) neighbor
+                b = mask & ~np.isnan(shifted) & (shifted.astype(np.int32) != int(lab))
+                if b.any():
+                    neigh.append(shifted[b].astype(np.int32))
 
-        ds['WhSh'] = ds['Wh']*ds['Sh']
-        
-        ds['sumWhSh'] = sum(ds['WhSh'])
-        nh = round(n*ds['WhSh']/(ds['sumWhSh']-ds['WhSh'])).values
+            if len(neigh) == 0:
+                continue
 
-        ds['nh'] = nh
-        return nh, n
-    
-    ## convert the boundaries into its according index value
-    bound = find_max_indices_of_boundary_groups(dfSorted['crf'])
-    init_stratified = stratifyBound(dfSorted, 'index', bound)
-    nh, n = calc_strata(init_stratified, n_strata, c_precision)
+            neigh_labels = np.concatenate(neigh).astype(np.int32)
 
-    ## 
-    r=0
-    while r < iteration:
-        # print(r)
-        randG = random.choice(range(1, n_strata)) ## randomly choose one boundary to be optimised
-        randBou = bound[randG]
-        popG=int(N/100)
-        jran = range(-popG, popG,1)
-        filtered_jran = [num for num in jran if num != 0]
+            # >>> critical fix: remove any negative labels (and anything weird) before bincount
+            neigh_labels = neigh_labels[neigh_labels >= 0]
+            if neigh_labels.size == 0:
+                continue
 
-        ## get random integer to transfer a 'p' number of data between two strata divided by 'randG' boundary.
-        p = random.choice(filtered_jran) 
+            new_lab = int(np.bincount(neigh_labels).argmax())
+            A2[mask] = new_lab
 
-        newRandBou = randBou+p
-        tempBound = bound.copy()
-        tempBound[randG]=newRandBou
+        merged_long = _df_from_grid(grid, A2, strata_col)
+        out = out.drop(columns=[strata_col]).merge(merged_long, on=["X", "Y"], how="left")
+        out[strata_col] = out[strata_col].astype("int32")
 
-        def is_increasing(lst):
-            return all(x < y for x, y in zip(lst, lst[1:]))
-        def count_differences(lst):
-            return [y - x for x, y in zip(lst, lst[1:])]
+    return out
 
-        if is_increasing(tempBound) == True:
-            Nh = count_differences(tempBound)
-            if all(numb >= 2 for numb in Nh):
-                # print('Nh condition satisfied')
-                
-                ## Using the initial boundary, calculate initial value of n(a) and nh each strata
-                stratDF = stratifyBound(dfSorted, 'index', tempBound)
-                # print(stratDF)
-                up_nh, up_n = calc_strata(stratDF, n_strata, c_precision)
-                # print(up_nhL_1)
-                if all(numb >= 2 for numb in up_nh) & (up_n < n):
-                    # print('nh and condition n(a) satisfied')
-                    n = up_n.copy()
-                    bound = tempBound.copy()
-                          
-        r += 1
 
-    ## Take the final boundary to get the final stratum area (optimal result)
-    finalStratDF = pd.DataFrame(stratifyBound(dfSorted, 'index', bound))
+def smooth_and_merge_loop(
+    df,
+    strata_col="strata",
+    kernel_size=3,
+    n_iter=3,
+    min_share=0.08,
+    merge_after_iter=2,   # start merging from this iteration (2 is a good default)
+):
+    out = df.copy()
 
-    finalStratDF = finalStratDF[['X', 'Y', 'Strata']]
-    finalStratDF = pd.merge(dataframe, finalStratDF, on=['X', 'Y'], how='left')
-    return finalStratDF['Strata']
+    for i in range(1, n_iter + 1):
+        prev = out[strata_col].copy()
+
+        # 1) smoothing
+        out = smooth_strata_majority(out, strata_col, kernel_size=kernel_size)
+
+        # 2) merging small strata (optionally delayed)
+        if (min_share is not None) and (i >= merge_after_iter):
+            out = merge_small_strata_by_area_adjacency(out, strata_col, min_share=min_share)
+
+        # diagnostics (optional but super useful)
+        changed = (prev != out[strata_col]).mean() * 100
+        n_strata = out[strata_col].nunique(dropna=True)
+        print(f"iter {i}: changed={changed:.2f}% | n_strata={n_strata}")
+
+        # stop if very stable
+        if changed < 1.0:
+            break
+
+    return out
+
 
 def calculate_stratum(dataset, strata_column, n_samples=40):
     ## dataset should contain 'Val', 'Var', and the 'defined Strata'
@@ -537,9 +483,9 @@ def _min_pairwise_distance_xy(df):
     min_distance = np.min(distances[:, 1])  # Exclude the zero distance to self
     return min_distance
 
-def choose_global_minimum_samples_by_n(
+def choose_global_minimum_samples_by_fixed_H(
     data,
-    H_max=7,
+    defH=7,
     area=None,
     nh_min=3,
     aimed_Svar=0.001,
@@ -547,121 +493,166 @@ def choose_global_minimum_samples_by_n(
     kernel_size=3,
     n_sim=100,
     max_attempts=100,
-    prefer_lower_H=True,
-    packing_factor=0.5,   # more conservative than 1.0
-    geom_boundary=None, 
+    packing_factor=0.5,
+    geom_boundary=None,
     edge_buffer=0,
 ):
-    """
-    Guaranteed global minimum n_samples:
-    - Loop n_samples from smallest to largest
-    - For each n_samples, try all H
-    - Return immediately when at least one feasible design exists for that n_samples
-      (pick best among H using tie rules).
-    """
     if area is None or area <= 0:
         raise ValueError("area must be provided in hectares and > 0.")
-    if H_max < 3:
-        raise ValueError("H_max must be >= 3.")
+    if defH < 3:
+        raise ValueError("defH must be >= 3.")
+
+    H = defH  # fixed H
 
     # Conservative-ish physical cap (still approximate)
     n_max = int(max(1, packing_factor * area * 10000 / (minDistance * minDistance)))
 
-    # Smallest possible n overall occurs at H=3 (since you require H>=3)
-    n_min = nh_min * 3
+    # ✅ fixed H => minimum is nh_min * H
+    n_min = nh_min * H
 
-    # --- Precompute strata maps for each H once (big speed-up) ---
-    strata_cache = {}
-    for H in range(3, H_max + 1):
-        temp_df = data.copy()
-        temp_df["strata"] = stratify_major2D(
-            dataframe=temp_df,
-            kernel_size=kernel_size,
-            n_strata=H,
-            n_sim=n_sim,
-        )
-        # Cache grouped pixels per stratum id for faster sampling later
-        strata_ids = sorted(temp_df["strata"].dropna().unique().tolist())
-        groups = {h: temp_df[temp_df["strata"] == h].reset_index(drop=True) for h in strata_ids}
-        strata_cache[H] = (temp_df, groups)
+    # ✅ only compute strata for this H once
+    temp_df = data.copy()
+    temp_df["strata"] = stratify_major2D(
+        dataframe=temp_df,
+        kernel_size=kernel_size,
+        n_strata=H,
+        n_sim=n_sim,
+    )
+    # # smooth multiple times
+    temp_df = smooth_and_merge_loop(
+        temp_df,
+        strata_col="strata",
+        kernel_size=3,      # boss wants 3 or 5 → start with 3
+        n_iter=3,           # usually 2–3 is enough
+        min_share=0.08,     # 8% threshold
+        merge_after_iter=2  # merge from iteration 2
+    )
 
-    # --- Global search: n first, then H ---
+    strata_ids = sorted(temp_df["strata"].dropna().unique().tolist())
+    strata_groups = {
+        h: temp_df[temp_df["strata"] == h].reset_index(drop=True)
+        for h in strata_ids
+    }
+
+    # --- Search: n first (global minimum n for this fixed H) ---
     for n_samples in range(n_min, n_max + 1):
-        feasible_designs = []
 
-        for H in range(3, H_max + 1):
-            # cannot allocate < nh_min per stratum
-            if n_samples < nh_min * H:
-                continue
+        g, Svar = calculate_stratum(
+            temp_df, strata_column="strata", n_samples=n_samples
+        )
+        g = g.sort_values("h")
 
-            temp_df, strata_groups = strata_cache[H]
+        nh = g["nh"].to_list()
+        stratum = g["h"].to_list()
 
-            g, Svar = calculate_stratum(temp_df, strata_column="strata", n_samples=n_samples)
-            g = g.sort_values("h")
+        # constraints
+        if Svar > aimed_Svar:
+            continue
+        if any(v < nh_min for v in nh):
+            continue
+        if len(stratum) < 3:
+            continue
 
-            nh = g["nh"].to_list()
-            stratum = g["h"].to_list()
+        samp_df = None
+        for _ in range(max_attempts):
+            parts = []
+            ok = True
 
-            # statistical + minimum-per-stratum constraints
-            if Svar > aimed_Svar:
-                continue
-            if any(v < nh_min for v in nh):
-                continue
-
-            # Try to place points satisfying minDistance
-            samp_df = None
-            for _ in range(max_attempts):
-                parts = []
-                ok = True
-
-                for h, nh_i in zip(stratum, nh):
-                    subdf = strata_groups.get(h)
-                    if subdf is None or len(subdf) == 0:
-                        ok = False
-                        break
-                    try:
-                        samp_h = where_to_sample_in_stratum(subdf, min_distance=minDistance, 
-                                                            nh=nh_i, edge_buffer=edge_buffer,
-                                                            geom_boundary=geom_boundary)
-                    except RuntimeError:
-                        ok = False
-                        break
-                    parts.append(samp_h)
-
-                if not ok:
-                    continue
-
-                samp_try = pd.concat(parts, ignore_index=True)
-                min_dist = _min_pairwise_distance_xy(samp_try)
-
-                if min_dist >= minDistance:
-                    samp_df = samp_try
+            for h, nh_i in zip(stratum, nh):
+                subdf = strata_groups.get(h)
+                if subdf is None or len(subdf) == 0:
+                    ok = False
                     break
+                try:
+                    samp_h = where_to_sample_in_stratum(
+                        subdf,
+                        min_distance=minDistance,
+                        nh=nh_i,
+                        edge_buffer=edge_buffer,
+                        geom_boundary=geom_boundary,
+                    )
+                except RuntimeError:
+                    ok = False
+                    break
+                parts.append(samp_h)
 
-            if samp_df is None:
+            if not ok:
                 continue
 
-            feasible_designs.append({
-                "n_strata": int(H),
-                "n_samples": int(n_samples),
-                "sampling_variance": float(Svar),
-                "nh": nh,
-                "val_stratum": stratum,
-                "strata_df": temp_df,   # keep
-                "samp_df": samp_df,     # keep
-                "min_dist": float(_min_pairwise_distance_xy(samp_df)),
-            })
+            samp_try = pd.concat(parts, ignore_index=True)
+            min_dist = _min_pairwise_distance_xy(samp_try)
 
-        # ✅ Early stop at the FIRST n_samples that yields any feasible design
-        if feasible_designs:
-            # choose best among H for this minimal n_samples
-            feasible_designs.sort(
-                key=lambda d: (
-                    d["n_samples"],                              # (all equal here)
-                    d["n_strata"] if prefer_lower_H else -d["n_strata"],
-                    d["sampling_variance"],                      # smaller is better
-                )
-            )
-            return feasible_designs[0]
+            if min_dist >= minDistance:
+                samp_df = samp_try
+                break
 
+        if samp_df is None:
+            continue
+
+        H = len(strata_ids)
+
+        # ✅ return immediately when first feasible n is found
+        return {
+            "n_strata": int(H),
+            "n_samples": int(n_samples),
+            "sampling_variance": float(Svar),
+            "alloc_df": g,          # allocation table
+            "strata_df": temp_df,   # per-pixel strata map
+            "samp_df": samp_df,
+            "min_dist": float(min_dist),
+        }
+
+    # ✅ nothing feasible
     return None
+
+def choose_best_by_lowest_svar_across_H(
+    data,
+    H_min=3,
+    H_max=6,
+    area=None,
+    nh_min=3,
+    aimed_Svar=0.001,
+    minDistance=50,
+    kernel_size=3,
+    n_sim=100,
+    max_attempts=100,
+    geom_boundary=None,
+    edge_buffer=0,
+    smooth_kwargs=None,
+):
+    """
+    Try H in [H_min..H_max], find a feasible design for each H (using your existing logic),
+    then return the feasible design with the lowest sampling_variance.
+    """
+    smooth_kwargs = smooth_kwargs or {}
+
+    candidates = []
+
+    for H in range(H_min, H_max + 1):
+        # --- call your per-H finder (whatever you use internally) ---
+        # If your code currently only exposes choose_global_minimum_samples_by_fixed_H,
+        # then you can call it with defH=H and treat that as "try this H".
+        res = choose_global_minimum_samples_by_fixed_H(
+            data=data,
+            defH=H,
+            area=area,
+            nh_min=nh_min,
+            aimed_Svar=aimed_Svar,
+            minDistance=minDistance,
+            kernel_size=kernel_size,
+            n_sim=n_sim,
+            max_attempts=max_attempts,
+            geom_boundary=geom_boundary,
+            edge_buffer=edge_buffer,
+        )
+
+        if res is None:
+            continue
+        candidates.append(res)
+
+    if not candidates:
+        return None
+
+    # Choose the lowest sampling variance; tie-breakers are optional
+    candidates.sort(key=lambda d: (d["sampling_variance"], d["n_samples"], d["n_strata"]))
+    return candidates[0]
