@@ -31,7 +31,7 @@ uploaded = st.file_uploader(
     "Upload Farm boundary (ZIP Shapefile / GeoJSON / KML / KMZ)",
     type=["zip", "geojson", "json", "kml", "kmz"]
 )
-upload_name = Path(uploaded.name).stem
+
 
 
 # --- Output options ---
@@ -284,6 +284,7 @@ if run_btn:
 
 # --- DISPLAY BLOCK: always show if results exist (runs on every rerun) ---
 if st.session_state.get("results_ready", False):
+    upload_name = Path(uploaded.name).stem
 
     st.subheader(f"Sampling Results")
     # st.write("Optimal design:", st.session_state["optimal_n"])

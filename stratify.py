@@ -353,28 +353,32 @@ def smooth_and_merge_loop(
     kernel_size=3,
     n_iter=3,
     min_share=0.08,
-    merge_after_iter=2,   # start merging from this iteration (2 is a good default)
 ):
     out = df.copy()
 
+    # ---- smoothing only ----
     for i in range(1, n_iter + 1):
         prev = out[strata_col].copy()
 
-        # 1) smoothing
         out = smooth_strata_majority(out, strata_col, kernel_size=kernel_size)
 
-        # 2) merging small strata (optionally delayed)
-        if (min_share is not None) and (i >= merge_after_iter):
-            out = merge_small_strata_by_area_adjacency(out, strata_col, min_share=min_share)
-
-        # diagnostics (optional but super useful)
         changed = (prev != out[strata_col]).mean() * 100
         n_strata = out[strata_col].nunique(dropna=True)
-        print(f"iter {i}: changed={changed:.2f}% | n_strata={n_strata}")
+        print(f"smooth iter {i}: changed={changed:.2f}% | n_strata={n_strata}")
 
-        # stop if very stable
         if changed < 1.0:
             break
+
+    # ---- single merge at the end ----
+    if min_share is not None:
+        out = merge_small_strata_by_area_adjacency(
+            out,
+            strata_col,
+            min_share=min_share,
+        )
+
+        n_strata = out[strata_col].nunique(dropna=True)
+        print(f"after merge (<{min_share*100:.0f}%): n_strata={n_strata}")
 
     return out
 
@@ -525,7 +529,7 @@ def choose_global_minimum_samples_by_fixed_H(
         kernel_size=3,      # boss wants 3 or 5 → start with 3
         n_iter=3,           # usually 2–3 is enough
         min_share=0.08,     # 8% threshold
-        merge_after_iter=2  # merge from iteration 2
+        # merge_after_iter=2  # merge from iteration 2
     )
 
     strata_ids = sorted(temp_df["strata"].dropna().unique().tolist())
