@@ -18,6 +18,13 @@ import pandas as pd
 
 from pyproj import CRS
 
+from pyproj import Transformer
+transformer = Transformer.from_crs(
+    "EPSG:32755",
+    "EPSG:4326",
+    always_xy=True
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
@@ -252,6 +259,17 @@ if run_btn:
 
                 strata_df = best["strata_df"]
                 samp_df   = best["samp_df"]  
+
+                # transform X (easting), Y (northing)
+                samp_df["lon"], samp_df["lat"] = transformer.transform(
+                    samp_df["X"].to_numpy(),
+                    samp_df["Y"].to_numpy()
+                )
+
+                strata_df["lon"], strata_df["lat"] = transformer.transform(
+                    strata_df["X"].to_numpy(),
+                    strata_df["Y"].to_numpy()
+                )
 
                 fig3 = stratify.plot_stratum_grid_fig(strata_df, "strata", samp_df, plot_title="Sampling points over strata",
                                                       gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
