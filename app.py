@@ -220,6 +220,11 @@ if run_btn:
                 varSOC_out = OUTPUT_DIR / "clipped_SOC_var.tif"
                 _clip_raster(str(varSOC_in), str(varSOC_out),
                              crop=crop_to_geom, all_touched=all_touched, buffer_m=15)
+                
+                meanSOC_in_0 = DATA_DIR / "SOC_AU/SOC_0_100_pedogenon_mean_genos_clipped_30m.tif"
+                meanSOC_out_0 = OUTPUT_DIR / "clipped_SOC_mean_0.tif"
+                _clip_raster(str(meanSOC_in_0), str(meanSOC_out_0),
+                             crop=crop_to_geom, all_touched=all_touched, buffer_m=15)                
 
                 # extract points
                 utils.extract_to_csv()
@@ -238,6 +243,12 @@ if run_btn:
 
                 st.pyplot(fig1)
                 st.pyplot(fig2)
+
+                # plot SOC Diff
+                datadiff = utils.calculate_SOC_diff()
+                fig_diff = stratify.plot_continuous_data_fig(datadiff, "SOC_diff", plot_title=f"Carbon Sequestration Potential at 0-100 cm depth",
+                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
+                st.pyplot(fig_diff)
 
                 st.metric(f"Target sampling variance (ton²):", 
                           smart_format(var*0.02, fixed_decimals=4, sci_threshold=1e-3))
