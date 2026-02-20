@@ -7,3 +7,6 @@ tunnel.log
 carbonApp.spec
 cloudflared**
 launcher**
+ssd
+shapefiles
+OUT_SOC
