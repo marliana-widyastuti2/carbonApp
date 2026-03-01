@@ -32,6 +32,11 @@ DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
 DST_CRS = CRS.from_epsg(32755)
 
+def clear_results(prefix="result_"):
+    for k in list(st.session_state.keys()):
+        if k.startswith(prefix):
+            del st.session_state[k]
+
 st.set_page_config(page_title="SamplingApp", layout="centered")
 st.title("Optimised Sampling Design")
 
@@ -41,7 +46,12 @@ uploaded = st.file_uploader(
     type=["zip", "geojson", "json", "kml", "kmz"]
 )
 
+if uploaded is not None:
+    file_signature = (uploaded.name, uploaded.size)
 
+    if st.session_state.get("last_uploaded") != file_signature:
+        clear_results()
+        st.session_state["last_uploaded"] = file_signature
 
 # --- Output options ---
 out_dir = OUTPUT_DIR
@@ -186,21 +196,6 @@ def _clip_raster(
         with rasterio.open(path_raster_out, "w", **out_meta) as dst:
             dst.write(out_image)
 
-
-def clear_results():
-    for k in [
-        "results_ready",
-        "optimal_n",
-        "strata_df",
-        "samp_df",
-        "fig_sampling",
-        "fig_soc_mean",
-        "fig_soc_var",
-        "strata_csv_bytes",
-        "samp_csv_bytes",
-    ]:
-        st.session_state.pop(k, None)
-
 def smart_format(x, fixed_decimals=4, sci_threshold=1e-3):
     if x == 0:
         return "0"
@@ -310,16 +305,16 @@ if run_btn:
                 })
 
                 # store results so they persist across reruns
-                st.session_state["optimal_n"] = optimal_n
-                st.session_state["best"] = best
-                st.session_state["strata_df"] = strata_df
-                st.session_state["samp_df"] = samp_df
-                st.session_state["fig_sampling"] = fig3
+                st.session_state["results_optimal_n"] = optimal_n
+                st.session_state["results_best"] = best
+                st.session_state["results_strata_df"] = strata_df
+                st.session_state["results_samp_df"] = samp_df
+                st.session_state["results_fig_sampling"] = fig3
                 st.session_state["results_ready"] = True
 
                 # (optional) store CSV bytes now (so download never triggers to_csv again)
-                st.session_state["strata_csv_bytes"] = strata_df.to_csv(index=False).encode("utf-8")
-                st.session_state["samp_csv_bytes"]   = samp_df.to_csv(index=False).encode("utf-8")
+                st.session_state["results_strata_csv_bytes"] = strata_df.to_csv(index=False).encode("utf-8")
+                st.session_state["results_samp_csv_bytes"]   = samp_df.to_csv(index=False).encode("utf-8")
 
                 ## calculate and store RS-based SOC maps
                 _, shp_name = read_vector_upload(uploaded)
@@ -337,7 +332,7 @@ if st.session_state.get("results_ready", False):
     st.subheader(f"Sampling Results")
     # st.write("Optimal design:", st.session_state["optimal_n"])
 
-    best = st.session_state.get("best")
+    best = st.session_state.get("results_best")
     c1, c2, c3, c4 = st.columns(4)
 
     c1.metric("Strata (H)", best["n_strata"])
@@ -347,22 +342,21 @@ if st.session_state.get("results_ready", False):
     c4.metric("Sampling error (ton)", 
               smart_format(float(np.sqrt(best["sampling_variance"])), fixed_decimals=4, sci_threshold=1e-3))
 
-    st.session_state["fig_sampling"]
-
+    st.pyplot(st.session_state["results_fig_sampling"])
 
     st.subheader("Download results")
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
             "⬇️ Download stratified dataset (CSV)",
-            st.session_state["strata_csv_bytes"],
+            st.session_state["results_strata_csv_bytes"],
             file_name=f"stratified_dataset_{upload_name}.csv",
             mime="text/csv",
         )
     with col2:
         st.download_button(
             "⬇️ Download sampling points (CSV)",
-            st.session_state["samp_csv_bytes"],
+            st.session_state["results_samp_csv_bytes"],
             file_name=f"sampling_points_{upload_name}.csv",
             mime="text/csv",
         )
