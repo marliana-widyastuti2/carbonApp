@@ -12,13 +12,15 @@ from rasterio.mask import mask
 
 import utils
 import stratify
+import soc_rs
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from pyproj import CRS
-
 from pyproj import Transformer
+
 transformer = Transformer.from_crs(
     "EPSG:32755",
     "EPSG:4326",
@@ -52,6 +54,7 @@ run_btn = st.button("Generate sampling design")
 
 def read_vector_upload(uploaded_file) -> gpd.GeoDataFrame:
     name = uploaded_file.name.lower()
+    name_only = Path(uploaded_file.name).stem
 
     with tempfile.TemporaryDirectory() as tmpdir:
         in_path = os.path.join(tmpdir, uploaded_file.name)
@@ -66,10 +69,10 @@ def read_vector_upload(uploaded_file) -> gpd.GeoDataFrame:
             shp_files = [os.path.join(tmpdir, p) for p in os.listdir(tmpdir) if p.lower().endswith(".shp")]
             if not shp_files:
                 raise ValueError("ZIP does not contain a .shp file.")
-            return gpd.read_file(shp_files[0])
+            gdf = gpd.read_file(shp_files[0])
 
         # ---- KMZ (zip containing KML) ----
-        if name.endswith(".kmz"):
+        elif name.endswith(".kmz"):
             with zipfile.ZipFile(in_path, "r") as z:
                 kml_candidates = [p for p in z.namelist() if p.lower().endswith(".kml")]
                 if not kml_candidates:
@@ -81,25 +84,38 @@ def read_vector_upload(uploaded_file) -> gpd.GeoDataFrame:
 
             # Some GDAL builds need the KML driver specified
             try:
-                return gpd.read_file(kml_path, driver="KML")
+                gdf = gpd.read_file(kml_path, driver="KML")
             except TypeError:
-                return gpd.read_file(kml_path)
+                gdf = gpd.read_file(kml_path)
 
         # ---- KML ----
-        if name.endswith(".kml"):
+        elif name.endswith(".kml"):
             try:
-                return gpd.read_file(in_path, driver="KML")
+                gdf = gpd.read_file(in_path, driver="KML")
             except TypeError:
-                return gpd.read_file(in_path)
+                gdf = gpd.read_file(in_path)
 
         # ---- GeoJSON / JSON ----
-        if name.endswith(".geojson") or name.endswith(".json"):
-            return gpd.read_file(in_path)
+        elif name.endswith(".geojson") or name.endswith(".json"):
+            gdf = gpd.read_file(in_path)
 
-        raise ValueError("Unsupported file type.")
+        else:
+            raise ValueError("Unsupported file type.")
+        
+    # save gdf into shapefile
+    out_dir = BASE_DIR / "shapefiles"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = out_dir / f"{name_only}.shp"
+    gdf.to_file(out_path, driver="ESRI Shapefile")
+
+    if not out_path.exists():
+        raise RuntimeError(f"Shapefile write failed: {out_path}")
+    
+    return gdf, name_only
 
 def _calculate_area_ha() -> float:
-    gdf = read_vector_upload(uploaded)
+    gdf, _ = read_vector_upload(uploaded)
 
     if gdf.empty:
         raise ValueError("Vector file has no features.")
@@ -122,7 +138,7 @@ def _clip_raster(
     all_touched: bool,
     buffer_m: float = 0.0,           # <-- NEW
 ) -> None:
-    gdf = read_vector_upload(uploaded)
+    gdf, _ = read_vector_upload(uploaded)
     if gdf.empty:
         raise ValueError("Vector file has no features.")
 
@@ -192,8 +208,6 @@ def smart_format(x, fixed_decimals=4, sci_threshold=1e-3):
         return f"{x:.2e}"
     return f"{x:.{fixed_decimals}f}"
 
-
-
 # --- RUN BLOCK: compute and store results ---
 if run_btn:
     clear_results()
@@ -237,9 +251,9 @@ if run_btn:
                 # store quick plots too if you want them persistent
                 fig1 = stratify.plot_continuous_data_fig(dataset, "Val", 
                                                          plot_title=f"Estimated Carbon Stock at 0-100 cm depth [average = {mean:.2f} ton]",
-                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
+                                                         gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
                 fig2 = stratify.plot_continuous_data_fig(dataset, "Var", plot_title=f"Variance of estimated Carbon Stock at 0-100 cm depth [average = {var:.2f} ton²]",
-                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
+                                                         gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
 
                 st.pyplot(fig1)
                 st.pyplot(fig2)
@@ -247,7 +261,7 @@ if run_btn:
                 # plot SOC Diff
                 datadiff = utils.calculate_SOC_diff()
                 fig_diff = stratify.plot_continuous_data_fig(datadiff, "SOC_diff", plot_title=f"Carbon Sequestration Potential at 0-100 cm depth",
-                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
+                                                         gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
                 st.pyplot(fig_diff)
 
                 st.metric(f"Target sampling variance (ton²):", 
@@ -260,7 +274,7 @@ if run_btn:
                     nh_min=3,
                     aimed_Svar=var*0.02,
                     minDistance=25,
-                    geom_boundary=read_vector_upload(uploaded).to_crs(DST_CRS),
+                    geom_boundary=read_vector_upload(uploaded)[0].to_crs(DST_CRS),
                     edge_buffer=5,
                 )
 
@@ -283,7 +297,7 @@ if run_btn:
                 )
 
                 fig3 = stratify.plot_stratum_grid_fig(strata_df, "strata", samp_df, plot_title="Sampling points over strata",
-                                                      gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
+                                                      gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
 
                 optimal_n = pd.Series({
                     "n_strata": best["n_strata"],
@@ -306,6 +320,11 @@ if run_btn:
                 # (optional) store CSV bytes now (so download never triggers to_csv again)
                 st.session_state["strata_csv_bytes"] = strata_df.to_csv(index=False).encode("utf-8")
                 st.session_state["samp_csv_bytes"]   = samp_df.to_csv(index=False).encode("utf-8")
+
+                ## calculate and store RS-based SOC maps
+                _, shp_name = read_vector_upload(uploaded)
+                soc_rs.run_farms_predict_mosaic(
+                    [shp_name])
 
             st.success("Done!")
         except Exception as e:
