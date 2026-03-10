@@ -13,6 +13,7 @@ from rasterio.mask import mask
 import utils
 import stratify
 import soc_rs
+import samplingDifference
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,6 +46,7 @@ uploaded = st.file_uploader(
     "Upload Farm boundary (ZIP Shapefile / GeoJSON / KML / KMZ)",
     type=["zip", "geojson", "json", "kml", "kmz"]
 )
+FARM_NAME = None
 
 if uploaded is not None:
     file_signature = (uploaded.name, uploaded.size)
@@ -52,6 +54,8 @@ if uploaded is not None:
     if st.session_state.get("last_uploaded") != file_signature:
         clear_results()
         st.session_state["last_uploaded"] = file_signature
+
+    FARM_NAME = Path(uploaded.name).stem
 
 # --- Output options ---
 out_dir = OUTPUT_DIR
@@ -64,7 +68,6 @@ run_btn = st.button("Generate sampling design")
 
 def read_vector_upload(uploaded_file) -> gpd.GeoDataFrame:
     name = uploaded_file.name.lower()
-    name_only = Path(uploaded_file.name).stem
 
     with tempfile.TemporaryDirectory() as tmpdir:
         in_path = os.path.join(tmpdir, uploaded_file.name)
@@ -116,16 +119,16 @@ def read_vector_upload(uploaded_file) -> gpd.GeoDataFrame:
     out_dir = BASE_DIR / "shapefiles"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = out_dir / f"{name_only}.shp"
+    out_path = out_dir / f"{FARM_NAME}.shp"
     gdf.to_file(out_path, driver="ESRI Shapefile")
 
     if not out_path.exists():
         raise RuntimeError(f"Shapefile write failed: {out_path}")
     
-    return gdf, name_only
+    return gdf
 
 def _calculate_area_ha() -> float:
-    gdf, _ = read_vector_upload(uploaded)
+    gdf = read_vector_upload(uploaded)
 
     if gdf.empty:
         raise ValueError("Vector file has no features.")
@@ -148,7 +151,7 @@ def _clip_raster(
     all_touched: bool,
     buffer_m: float = 0.0,           # <-- NEW
 ) -> None:
-    gdf, _ = read_vector_upload(uploaded)
+    gdf = read_vector_upload(uploaded)
     if gdf.empty:
         raise ValueError("Vector file has no features.")
 
@@ -205,7 +208,6 @@ def smart_format(x, fixed_decimals=4, sci_threshold=1e-3):
 
 # --- RUN BLOCK: compute and store results ---
 if run_btn:
-    clear_results()
     if uploaded is None:
         st.error("Please upload a file.")
     else:
@@ -246,9 +248,9 @@ if run_btn:
                 # store quick plots too if you want them persistent
                 fig1 = stratify.plot_continuous_data_fig(dataset, "Val", 
                                                          plot_title=f"Estimated Carbon Stock at 0-100 cm depth [average = {mean:.2f} ton]",
-                                                         gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
+                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
                 fig2 = stratify.plot_continuous_data_fig(dataset, "Var", plot_title=f"Variance of estimated Carbon Stock at 0-100 cm depth [average = {var:.2f} ton²]",
-                                                         gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
+                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
 
                 st.pyplot(fig1)
                 st.pyplot(fig2)
@@ -256,10 +258,10 @@ if run_btn:
                 # plot SOC Diff
                 datadiff = utils.calculate_SOC_diff()
                 fig_diff = stratify.plot_continuous_data_fig(datadiff, "SOC_diff", plot_title=f"Carbon Sequestration Potential at 0-100 cm depth",
-                                                         gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
+                                                         gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
                 st.pyplot(fig_diff)
 
-                st.metric(f"Target sampling variance (ton²):", 
+                st.metric(f"Target sampling variance ((ton/ha)²):", 
                           smart_format(var*0.02, fixed_decimals=4, sci_threshold=1e-3))
 
                 best = stratify.choose_best_by_lowest_svar_across_H(
@@ -269,7 +271,7 @@ if run_btn:
                     nh_min=3,
                     aimed_Svar=var*0.02,
                     minDistance=25,
-                    geom_boundary=read_vector_upload(uploaded)[0].to_crs(DST_CRS),
+                    geom_boundary=read_vector_upload(uploaded).to_crs(DST_CRS),
                     edge_buffer=5,
                 )
 
@@ -292,7 +294,7 @@ if run_btn:
                 )
 
                 fig3 = stratify.plot_stratum_grid_fig(strata_df, "strata", samp_df, plot_title="Sampling points over strata",
-                                                      gdf=read_vector_upload(uploaded)[0], raster_crs=DST_CRS)
+                                                      gdf=read_vector_upload(uploaded), raster_crs=DST_CRS)
 
                 optimal_n = pd.Series({
                     "n_strata": best["n_strata"],
@@ -317,9 +319,17 @@ if run_btn:
                 st.session_state["results_samp_csv_bytes"]   = samp_df.to_csv(index=False).encode("utf-8")
 
                 ## calculate and store RS-based SOC maps
-                _, shp_name = read_vector_upload(uploaded)
                 soc_rs.run_farms_predict_mosaic(
-                    [shp_name])
+                    [FARM_NAME])
+                
+                samplingDifference.df_to_raster(strata_df)
+                sum_Y_diff, sum_var_Y, sum_T_diff, sum_var_T = samplingDifference.calc_est_difference(FARM_NAME, strata_df, samp_df)
+                
+                st.session_state["sum_Y_diff"] = sum_Y_diff
+                st.session_state["sum_var_Y"] = sum_var_Y
+                st.session_state["sum_T_diff"] = sum_T_diff
+                st.session_state["sum_var_T"] = sum_var_T
+                
 
             st.success("Done!")
         except Exception as e:
@@ -333,13 +343,15 @@ if st.session_state.get("results_ready", False):
     # st.write("Optimal design:", st.session_state["optimal_n"])
 
     best = st.session_state.get("results_best")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2= st.columns(2)
 
     c1.metric("Strata (H)", best["n_strata"])
     c2.metric("Total samples", best["n_samples"])
-    c3.metric("Sampling variance (ton²)", 
+
+    c3, c4 = st.columns(2)
+    c3.metric("Sampling variance ((ton/ha)²)", 
               smart_format(best["sampling_variance"], fixed_decimals=4, sci_threshold=1e-3))
-    c4.metric("Sampling error (ton)", 
+    c4.metric("Sampling error (ton/ha)", 
               smart_format(float(np.sqrt(best["sampling_variance"])), fixed_decimals=4, sci_threshold=1e-3))
 
     st.pyplot(st.session_state["results_fig_sampling"])
@@ -361,6 +373,22 @@ if st.session_state.get("results_ready", False):
             mime="text/csv",
         )
     st.caption("Coordinates are in **EPSG:32755 (WGS 84 / UTM zone 55S)**, units in meters.")
+
+    st.subheader(f"Sampling Difference")
+
+    st.metric("Overall SOC mean estimate (ton/ha)", 
+              smart_format(st.session_state.get("sum_Y_diff"), fixed_decimals=2, sci_threshold=1e-3))
+    st.metric("Variance of the mean estimate ((ton/ha)²)", 
+              smart_format(st.session_state.get("sum_var_Y"), fixed_decimals=2, sci_threshold=1e-3))
+    st.metric("Sampling Error of the mean estimate (ton/ha)", 
+              smart_format(float(np.sqrt(st.session_state.get("sum_var_Y"))), fixed_decimals=2, sci_threshold=1e-3))
+
+    st.metric("Total SOC estimate for the whole farm (ton)", 
+              smart_format(st.session_state.get("sum_T_diff"), fixed_decimals=2, sci_threshold=1e-3))
+    st.metric("Variance of the total SOC estimate (ton²)", 
+              smart_format(st.session_state.get("sum_var_T"), fixed_decimals=2, sci_threshold=1e-3))
+    st.metric("Sampling Error of the total SOC estimate (ton)", 
+              smart_format(float(np.sqrt(st.session_state.get("sum_var_T"))), fixed_decimals=2, sci_threshold=1e-3))
 
 # --- Footer with last modified date ---
 last_modified = datetime.fromtimestamp(Path(__file__).stat().st_mtime)
