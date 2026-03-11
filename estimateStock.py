@@ -180,3 +180,69 @@ def calc_est_difference(FARM_NAME = None, strata_df=None, samp_df=None):
     sum_var_T = np.sum(var_T)
     return sum_Y_diff, sum_var_Y, sum_T_diff, sum_var_T
 
+def calc_est_field(FARM_NAME = None, strata_df=None, samp_df=None):
+    strata_gdf = get_mean_x_h(FARM_NAME)
+    Nh = strata_df.groupby("strata").size().reset_index(name="N_h")
+    strata_gdf = strata_gdf.merge(Nh, on="strata", how="left")
+
+    samp = samp_df.copy()
+    samp_gdf = gpd.GeoDataFrame(
+        samp,
+        geometry=gpd.points_from_xy(
+            samp["X"],
+            samp["Y"]
+        ),
+        crs=DST_CRS
+    )
+    samp_gdf
+    samp_gdf = sample_raster_to_gdf(samp_gdf, "/home/marliana/shared_folder/CarbonApp/data/SOC_AU/SOC_0_100_stock_tonclipped_30m.tif", "y_h_s")
+
+    strata = strata_gdf['strata'].unique()
+
+    Y_hat = []
+    T_hat = []
+    var_Y = []
+    var_T = []
+
+    for s in strata:
+        print(f"Stratum {s}:")
+
+        row = strata_gdf[strata_gdf["strata"] == s].iloc[0]
+        samp_in_stratum = samp_gdf[samp_gdf["strata"] == s].copy()
+
+        A_h_m2 = row["A_h"]
+        A_h = A_h_m2 / 10000  # ha
+        W_h = A_h_m2 / strata_gdf["A_h"].sum()
+
+        N_h = row["N_h"]                 # total population units in stratum h
+        n_h = len(samp_in_stratum)       # sampled units in stratum h
+        f_h = n_h / N_h
+
+        print(f"  Area (A_h): {A_h:.2f} ha")
+        print(f"  Weight (W_h): {W_h:.4f}")
+        print(f"  Sample fraction (f_h): {f_h:.4f}")
+
+        mean_y_h_s = samp_in_stratum["y_h_s"].mean()
+        Wh_Yh_diff = W_h * mean_y_h_s
+        print(f"  Weighted contribution to overall mean for stratum {s}: {Wh_Yh_diff:.4f}")
+        Y_hat.append(Wh_Yh_diff)
+
+        T_hat_h = A_h * mean_y_h_s
+        print(f"  Estimated total SOC for stratum {s}: {T_hat_h:.4f} ton")
+        T_hat.append(T_hat_h)
+
+        var_y_h = np.var(samp_in_stratum["y_h_s"], ddof=1)
+
+        var_Y_h = (1 - f_h) * var_y_h / n_h * W_h**2
+        print(f"  Variance of Y_hat for stratum {s}: {var_Y_h:.4f} (ton/ha)^2")
+        var_Y.append(var_Y_h)
+
+        var_T_h = (1 - f_h) * var_y_h / n_h * A_h**2
+        print(f"  Variance of T_hat for stratum {s}: {var_T_h:.4f} (ton)^2")
+        var_T.append(var_T_h)    
+
+    sum_Y_hat = np.sum(Y_hat)
+    sum_T_hat = np.sum(T_hat)
+    sum_var_Y = np.sum(var_Y)
+    sum_var_T = np.sum(var_T)
+    return sum_Y_hat, sum_var_Y, sum_T_hat, sum_var_T
