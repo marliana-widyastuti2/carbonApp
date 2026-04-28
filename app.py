@@ -208,6 +208,10 @@ def smart_format(x, fixed_decimals=4, sci_threshold=1e-3):
 
 # --- RUN BLOCK: compute and store results ---
 if run_btn:
+    # clear old results first
+    st.session_state.pop("results_ready", None)
+    st.session_state.pop("optimal_n", None)
+    st.session_state.pop("results", None)
     if uploaded is None:
         st.error("Please upload a file.")
     else:
@@ -322,21 +326,35 @@ if run_btn:
                 soc_rs.run_farms_predict_mosaic(
                     [FARM_NAME])
                 
-                estimateStock.df_to_raster(strata_df)
-                ##1 calculate and store point x strata area estimates
-                sum_Y_hat, sum_var_Y_hat, sum_T_hat, sum_var_T_hat = estimateStock.calc_est_field(FARM_NAME, strata_df, samp_df)
-                st.session_state["sum_Y_hat"] = sum_Y_hat
-                st.session_state["sum_var_Y_hat"] = sum_var_Y_hat
-                st.session_state["sum_T_hat"] = sum_T_hat
-                st.session_state["sum_var_T_hat"] = sum_var_T_hat
+                field_folder = DATA_DIR / "field"
+                samp_df_field = field_folder / f"sampling_points_{FARM_NAME}.csv"  # adjust extension if needed
+                strata_df_field = field_folder / f"stratified_dataset_{FARM_NAME}.csv"
 
-                ##2 calculate and store difference method estimates
-                sum_Y_diff, sum_var_Y_diff, sum_T_diff, sum_var_T_diff = estimateStock.calc_est_difference(FARM_NAME, strata_df, samp_df)
-                st.session_state["sum_Y_diff"] = sum_Y_diff
-                st.session_state["sum_var_Y_diff"] = sum_var_Y_diff
-                st.session_state["sum_T_diff"] = sum_T_diff
-                st.session_state["sum_var_T_diff"] = sum_var_T_diff
+                if samp_df_field.exists():
+                    # run something
+                    strata_df_field = pd.read_csv(strata_df_field)
+                    samp_df_field = estimateStock.format_the_csv(samp_df_field, 
+                                                                 x_col="MeanLon", 
+                                                                 y_col="MeanLat", 
+                                                                 CRS="EPSG:4326", 
+                                                                 SOC_col="y_pred")
+                    estimateStock.df_to_raster(strata_df_field) ## convert strata_df to strata.tif 
+                    B, Y_reg, var_Y_reg, T_reg, var_T_reg = estimateStock.calc_est_regression(FARM_NAME, strata_df_field, samp_df_field, Farm_area_ha=area_ha)
+                    st.session_state["Y_reg"] = Y_reg
+                    st.session_state["var_Y_reg"] = var_Y_reg
+                    st.session_state["T_reg"] = T_reg
+                    st.session_state["var_T_reg"] = var_T_reg
 
+                    Y_str, var_Y_str, T_str, var_T_str = estimateStock.calc_est_stratified(FARM_NAME, strata_df_field, samp_df_field, Farm_area_ha=area_ha)
+                    st.session_state["Y_str"] = Y_str
+                    st.session_state["var_Y_str"] = var_Y_str
+                    st.session_state["T_str"] = T_str
+                    st.session_state["var_T_str"] = var_T_str
+
+                else:
+                    # skip for now because field data is not ready
+                    st.info("Field data is not available for this farm yet. Skipping field-based calculation.")
+                
             st.success("Done!")
         except Exception as e:
             st.exception(e)
@@ -383,18 +401,18 @@ if st.session_state.get("results_ready", False):
     def safe_sqrt(x):
         return float(np.sqrt(x)) if x is not None and np.isfinite(x) else None
 
-    st.subheader("Carbon Stock Estimation Results")
+    st.subheader("Carbon Stock Estimation Results (Coming Soon)")
 
     tab1, tab2 = st.tabs([
-        "Point × Strata Area Method",
-        "Remote Sensing Difference Method"
+        "Linear Regression Estimator",
+        "Stratified Estimator"
     ])
 
     # =========================
     # TAB 1
     # =========================
     with tab1:
-        st.markdown("### 1. Estimated C stock using point × strata area")
+        st.markdown("### 1. Estimated C stock integrating remote sensing data (regression method)")
 
         with st.container(border=True):
             st.markdown("#### Mean estimate")
@@ -402,15 +420,15 @@ if st.session_state.get("results_ready", False):
 
             c1.metric(
                 "Overall SOC mean estimate (ton/ha)",
-                smart_format(st.session_state.get("sum_Y_hat"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("Y_reg"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c2.metric(
                 "Variance of mean ((ton/ha)²)",
-                smart_format(st.session_state.get("sum_var_Y_hat"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("var_Y_reg"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c3.metric(
                 "Sampling error (ton/ha)",
-                smart_format(safe_sqrt(st.session_state.get("sum_var_Y_hat")), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(safe_sqrt(st.session_state.get("var_Y_reg")), fixed_decimals=2, sci_threshold=1e-3)
             )
 
         with st.container(border=True):
@@ -419,22 +437,22 @@ if st.session_state.get("results_ready", False):
 
             c4.metric(
                 "Total SOC estimate (ton)",
-                smart_format(st.session_state.get("sum_T_hat"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("T_reg"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c5.metric(
                 "Variance of total (ton²)",
-                smart_format(st.session_state.get("sum_var_T_hat"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("var_T_reg"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c6.metric(
                 "Sampling error (ton)",
-                smart_format(safe_sqrt(st.session_state.get("sum_var_T_hat")), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(safe_sqrt(st.session_state.get("var_T_reg")), fixed_decimals=2, sci_threshold=1e-3)
             )
 
     # =========================
     # TAB 2
     # =========================
     with tab2:
-        st.markdown("### 2. Estimated C stock using remote sensing data (difference method)")
+        st.markdown("### 2. Estimated C stock using stratified method")
 
         with st.container(border=True):
             st.markdown("#### Mean estimate")
@@ -442,15 +460,15 @@ if st.session_state.get("results_ready", False):
 
             c1.metric(
                 "Overall SOC mean estimate (ton/ha)",
-                smart_format(st.session_state.get("sum_Y_diff"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("Y_str"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c2.metric(
                 "Variance of mean ((ton/ha)²)",
-                smart_format(st.session_state.get("sum_var_Y_diff"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("var_Y_str"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c3.metric(
                 "Sampling error (ton/ha)",
-                smart_format(safe_sqrt(st.session_state.get("sum_var_Y_diff")), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(safe_sqrt(st.session_state.get("var_Y_str")), fixed_decimals=2, sci_threshold=1e-3)
             )
 
         with st.container(border=True):
@@ -459,15 +477,15 @@ if st.session_state.get("results_ready", False):
 
             c4.metric(
                 "Total SOC estimate (ton)",
-                smart_format(st.session_state.get("sum_T_diff"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("T_str"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c5.metric(
                 "Variance of total (ton²)",
-                smart_format(st.session_state.get("sum_var_T_diff"), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(st.session_state.get("var_T_str"), fixed_decimals=2, sci_threshold=1e-3)
             )
             c6.metric(
                 "Sampling error (ton)",
-                smart_format(safe_sqrt(st.session_state.get("sum_var_T_diff")), fixed_decimals=2, sci_threshold=1e-3)
+                smart_format(safe_sqrt(st.session_state.get("var_T_str")), fixed_decimals=2, sci_threshold=1e-3)
             )
             
 # --- Footer with last modified date ---
