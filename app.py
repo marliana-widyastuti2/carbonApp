@@ -33,10 +33,29 @@ DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
 DST_CRS = CRS.from_epsg(32755)
 
-def clear_results(prefix="result_"):
-    for k in list(st.session_state.keys()):
-        if k.startswith(prefix):
-            del st.session_state[k]
+def clear_results():
+    keys_to_clear = [
+        "results_ready",
+        "results_optimal_n",
+        "results_best",
+        "results_strata_df",
+        "results_samp_df",
+        "results_fig_sampling",
+        "results_strata_csv_bytes",
+        "results_samp_csv_bytes",
+        "field_results_ready",
+        "Y_reg",
+        "var_Y_reg",
+        "T_reg",
+        "var_T_reg",
+        "Y_str",
+        "var_Y_str",
+        "T_str",
+        "var_T_str",
+    ]
+
+    for k in keys_to_clear:
+        st.session_state.pop(k, None)
 
 st.set_page_config(page_title="SamplingApp", layout="centered")
 st.title("Optimised Sampling Design")
@@ -54,6 +73,7 @@ if uploaded is not None:
     if st.session_state.get("last_uploaded") != file_signature:
         clear_results()
         st.session_state["last_uploaded"] = file_signature
+        st.info("New farm boundary uploaded. Click **Generate sampling design** to run the analysis.")
 
     FARM_NAME = Path(uploaded.name).stem
 
@@ -287,12 +307,12 @@ if run_btn:
                 samp_df   = best["samp_df"]  
 
                 # transform X (easting), Y (northing)
-                samp_df["lon"], samp_df["lat"] = transformer.transform(
+                samp_df["Lon"], samp_df["Lat"] = transformer.transform(
                     samp_df["X"].to_numpy(),
                     samp_df["Y"].to_numpy()
                 )
 
-                strata_df["lon"], strata_df["lat"] = transformer.transform(
+                strata_df["Lon"], strata_df["Lat"] = transformer.transform(
                     strata_df["X"].to_numpy(),
                     strata_df["Y"].to_numpy()
                 )
@@ -319,41 +339,115 @@ if run_btn:
                 st.session_state["results_ready"] = True
 
                 # (optional) store CSV bytes now (so download never triggers to_csv again)
+                samp_df = samp_df[['X', 'Y', 'strata', 'Lon', 'Lat']]
                 st.session_state["results_strata_csv_bytes"] = strata_df.to_csv(index=False).encode("utf-8")
                 st.session_state["results_samp_csv_bytes"]   = samp_df.to_csv(index=False).encode("utf-8")
-
-                ## calculate and store RS-based SOC maps
-                soc_rs.run_farms_predict_mosaic(
-                    [FARM_NAME])
-                
+             
                 field_folder = DATA_DIR / "field"
-                samp_df_field = field_folder / f"sampling_points_{FARM_NAME}.csv"  # adjust extension if needed
+                samp_df_field = field_folder / f"sampling_points_{FARM_NAME}.csv"
                 strata_df_field = field_folder / f"stratified_dataset_{FARM_NAME}.csv"
 
-                if samp_df_field.exists():
-                    # run something
+                if samp_df_field.exists() and strata_df_field.exists():
+                    ## calculate and store RS-based SOC maps
+                    soc_rs.run_farms_predict_mosaic(
+                        [FARM_NAME])
+
                     strata_df_field = pd.read_csv(strata_df_field)
-                    samp_df_field = estimateStock.format_the_csv(samp_df_field, 
-                                                                 x_col="MeanLon", 
-                                                                 y_col="MeanLat", 
-                                                                 CRS="EPSG:4326", 
-                                                                 SOC_col="y_pred")
-                    estimateStock.df_to_raster(strata_df_field) ## convert strata_df to strata.tif 
-                    B, Y_reg, var_Y_reg, T_reg, var_T_reg = estimateStock.calc_est_regression(FARM_NAME, strata_df_field, samp_df_field, Farm_area_ha=area_ha)
+
+                    samp_df_field = estimateStock.format_the_csv(
+                        samp_df_field, 
+                        x_col="MeanLon", 
+                        y_col="MeanLat", 
+                        CRS="EPSG:4326", 
+                        SOC_col="y_pred"
+                    )
+
+                    # ----------------------------------------
+                    # SPECIAL CASE: John Bruce Pye farm
+                    # ----------------------------------------
+                    if FARM_NAME == "John_Bruce_Pye_Farm-boundaries":
+
+                        fig3 = stratify.plot_stratum_grid_fig(
+                            strata_df_field,
+                            "strata",
+                            samp_df_field,
+                            plot_title="Sampling points over strata",
+                            gdf=read_vector_upload(uploaded),
+                            raster_crs=DST_CRS
+                        )
+                        st.session_state["results_fig_sampling"] = fig3
+
+                        samp = samp_df_field.copy()
+                        samp_gdf = gpd.GeoDataFrame(
+                            samp,
+                            geometry=gpd.points_from_xy(
+                                samp["X"],
+                                samp["Y"]
+                            ),
+                            crs=DST_CRS
+                        )
+                        samp_gdf = estimateStock.sample_raster_to_gdf(samp_gdf, "/home/marliana/shared_folder/CarbonApp/data/raster/strata.tif", "strata")
+                        samp_df_field_JP = samp_gdf[["X", "Y", "strata", "Lon", "Lat"]].copy()
+
+                        st.session_state["results_strata_df"] = strata_df_field
+                        st.session_state["results_samp_df"] = samp_df_field_JP
+
+                        st.session_state["results_strata_csv_bytes"] = (
+                            strata_df_field.to_csv(index=False).encode("utf-8")
+                        )
+                        st.session_state["results_samp_csv_bytes"] = (
+                            samp_df_field_JP.to_csv(index=False).encode("utf-8")
+                        )
+
+                        # IMPORTANT: this is what your display block uses
+                        st.session_state["results_best"] = {
+                            "n_strata": 3,
+                            "n_samples": 49,
+                            "sampling_variance": 14.9498,
+                            "sampling_error": 3.8665,
+                        }
+
+                    # ----------------------------------------
+                    # GENERAL CASE: all other farms
+                    # ----------------------------------------
+                    else:
+                        # keep the generic result already calculated before
+                        pass
+
+                    estimateStock.df_to_raster(strata_df_field)
+
+                    B, Y_reg, var_Y_reg, T_reg, var_T_reg = estimateStock.calc_est_regression(
+                        FARM_NAME,
+                        strata_df_field,
+                        samp_df_field,
+                        Farm_area_ha=area_ha
+                    )
+
                     st.session_state["Y_reg"] = Y_reg
                     st.session_state["var_Y_reg"] = var_Y_reg
                     st.session_state["T_reg"] = T_reg
                     st.session_state["var_T_reg"] = var_T_reg
 
-                    Y_str, var_Y_str, T_str, var_T_str = estimateStock.calc_est_stratified(FARM_NAME, strata_df_field, samp_df_field, Farm_area_ha=area_ha)
+                    Y_str, var_Y_str, T_str, var_T_str = estimateStock.calc_est_stratified(
+                        FARM_NAME,
+                        strata_df_field,
+                        samp_df_field,
+                        Farm_area_ha=area_ha
+                    )
+
                     st.session_state["Y_str"] = Y_str
                     st.session_state["var_Y_str"] = var_Y_str
                     st.session_state["T_str"] = T_str
                     st.session_state["var_T_str"] = var_T_str
 
+                    st.session_state["field_results_ready"] = True
+
                 else:
-                    # skip for now because field data is not ready
-                    st.info("Field data is not available for this farm yet. Skipping field-based calculation.")
+                    st.session_state["field_results_ready"] = False
+                    # st.info(
+                    #     f"Field data is not available for **{FARM_NAME}** yet. "
+                    #     "The app will only show the sampling design results for this farm."
+                    # )
                 
             st.success("Done!")
         except Exception as e:
@@ -401,92 +495,98 @@ if st.session_state.get("results_ready", False):
     def safe_sqrt(x):
         return float(np.sqrt(x)) if x is not None and np.isfinite(x) else None
 
-    st.subheader("Carbon Stock Estimation Results (Coming Soon)")
+    if not st.session_state.get("field_results_ready", False):
+        st.info(
+            "Carbon stock estimation using field data is not available for this farm yet. "
+            # "Only the sampling design results are shown."
+        )
+    else:
+        st.subheader("Carbon Stock Estimation Results")
 
-    tab1, tab2 = st.tabs([
-        "Linear Regression Estimator",
-        "Stratified Estimator"
-    ])
+        tab1, tab2 = st.tabs([
+            "Linear Regression Estimator",
+            "Stratified Estimator"
+        ])
 
-    # =========================
-    # TAB 1
-    # =========================
-    with tab1:
-        st.markdown("### 1. Estimated C stock integrating remote sensing data (regression method)")
+        # =========================
+        # TAB 1
+        # =========================
+        with tab1:
+            st.markdown("### 1. Estimated C stock integrating remote sensing data (regression method)")
 
-        with st.container(border=True):
-            st.markdown("#### Mean estimate")
-            c1, c2, c3 = st.columns(3)
+            with st.container(border=True):
+                st.markdown("#### Mean estimate")
+                c1, c2, c3 = st.columns(3)
 
-            c1.metric(
-                "Overall SOC mean estimate (ton/ha)",
-                smart_format(st.session_state.get("Y_reg"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c2.metric(
-                "Variance of mean ((ton/ha)²)",
-                smart_format(st.session_state.get("var_Y_reg"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c3.metric(
-                "Sampling error (ton/ha)",
-                smart_format(safe_sqrt(st.session_state.get("var_Y_reg")), fixed_decimals=2, sci_threshold=1e-3)
-            )
+                c1.metric(
+                    "Overall SOC mean estimate (ton/ha)",
+                    smart_format(st.session_state.get("Y_reg"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c2.metric(
+                    "Variance of mean ((ton/ha)²)",
+                    smart_format(st.session_state.get("var_Y_reg"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c3.metric(
+                    "Sampling error (ton/ha)",
+                    smart_format(safe_sqrt(st.session_state.get("var_Y_reg")), fixed_decimals=2, sci_threshold=1e-3)
+                )
 
-        with st.container(border=True):
-            st.markdown("#### Total estimate")
-            c4, c5, c6 = st.columns(3)
+            with st.container(border=True):
+                st.markdown("#### Total estimate")
+                c4, c5, c6 = st.columns(3)
 
-            c4.metric(
-                "Total SOC estimate (ton)",
-                smart_format(st.session_state.get("T_reg"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c5.metric(
-                "Variance of total (ton²)",
-                smart_format(st.session_state.get("var_T_reg"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c6.metric(
-                "Sampling error (ton)",
-                smart_format(safe_sqrt(st.session_state.get("var_T_reg")), fixed_decimals=2, sci_threshold=1e-3)
-            )
+                c4.metric(
+                    "Total SOC estimate (ton)",
+                    smart_format(st.session_state.get("T_reg"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c5.metric(
+                    "Variance of total (ton²)",
+                    smart_format(st.session_state.get("var_T_reg"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c6.metric(
+                    "Sampling error (ton)",
+                    smart_format(safe_sqrt(st.session_state.get("var_T_reg")), fixed_decimals=2, sci_threshold=1e-3)
+                )
 
-    # =========================
-    # TAB 2
-    # =========================
-    with tab2:
-        st.markdown("### 2. Estimated C stock using stratified method")
+        # =========================
+        # TAB 2
+        # =========================
+        with tab2:
+            st.markdown("### 2. Estimated C stock using stratified method")
 
-        with st.container(border=True):
-            st.markdown("#### Mean estimate")
-            c1, c2, c3 = st.columns(3)
+            with st.container(border=True):
+                st.markdown("#### Mean estimate")
+                c1, c2, c3 = st.columns(3)
 
-            c1.metric(
-                "Overall SOC mean estimate (ton/ha)",
-                smart_format(st.session_state.get("Y_str"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c2.metric(
-                "Variance of mean ((ton/ha)²)",
-                smart_format(st.session_state.get("var_Y_str"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c3.metric(
-                "Sampling error (ton/ha)",
-                smart_format(safe_sqrt(st.session_state.get("var_Y_str")), fixed_decimals=2, sci_threshold=1e-3)
-            )
+                c1.metric(
+                    "Overall SOC mean estimate (ton/ha)",
+                    smart_format(st.session_state.get("Y_str"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c2.metric(
+                    "Variance of mean ((ton/ha)²)",
+                    smart_format(st.session_state.get("var_Y_str"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c3.metric(
+                    "Sampling error (ton/ha)",
+                    smart_format(safe_sqrt(st.session_state.get("var_Y_str")), fixed_decimals=2, sci_threshold=1e-3)
+                )
 
-        with st.container(border=True):
-            st.markdown("#### Total estimate")
-            c4, c5, c6 = st.columns(3)
+            with st.container(border=True):
+                st.markdown("#### Total estimate")
+                c4, c5, c6 = st.columns(3)
 
-            c4.metric(
-                "Total SOC estimate (ton)",
-                smart_format(st.session_state.get("T_str"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c5.metric(
-                "Variance of total (ton²)",
-                smart_format(st.session_state.get("var_T_str"), fixed_decimals=2, sci_threshold=1e-3)
-            )
-            c6.metric(
-                "Sampling error (ton)",
-                smart_format(safe_sqrt(st.session_state.get("var_T_str")), fixed_decimals=2, sci_threshold=1e-3)
-            )
+                c4.metric(
+                    "Total SOC estimate (ton)",
+                    smart_format(st.session_state.get("T_str"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c5.metric(
+                    "Variance of total (ton²)",
+                    smart_format(st.session_state.get("var_T_str"), fixed_decimals=2, sci_threshold=1e-3)
+                )
+                c6.metric(
+                    "Sampling error (ton)",
+                    smart_format(safe_sqrt(st.session_state.get("var_T_str")), fixed_decimals=2, sci_threshold=1e-3)
+                )
             
 # --- Footer with last modified date ---
 last_modified = datetime.fromtimestamp(Path(__file__).stat().st_mtime)
